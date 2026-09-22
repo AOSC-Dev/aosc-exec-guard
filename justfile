@@ -246,7 +246,7 @@ test: build
     printf '%s\nexit=%s\n' "$out" "$code"
     [ "$code" -eq 42 ] || fail "no tty and no GUI: the stub qemu should have run, got $code"
 
-    step 'qemu: terminal menu (pty, dialoguer): 运行 / 不运行 / 总是 / 从不'
+    step 'qemu: terminal menu (pty, dialoguer): 运行 / 不运行 / 总是'
     cat > "$TMP/bin/ask-guard" <<EOF
     #!/usr/bin/env bash
     export HOME="$PWD/$TMP/home" AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/binfmt" AOSC_EXEC_GUARD_QEMU=ask
@@ -269,6 +269,7 @@ test: build
     [ "$code" -eq 126 ] || fail "the default item should explain and exit 126, got $code"
     case "$out" in *'无法运行'*) ;; *) fail 'declining should print the explanation' ;; esac
     case "$out" in *'总是运行（不再询问）'*) ;; *) fail 'the dialoguer menu should have been drawn' ;; esac
+    case "$out" in *'总是不运行'*) fail '菜单里不该再有“总是不运行”（要固定 never 用配置/环境变量）' ;; esac
     ask_pty 'k\n'  # 上移一项 → 运行（这次）
     [ "$code" -eq 42 ] || fail "choosing “run once” should run the stub qemu, got $code"
     case "$out" in *'stub-qemu'*) ;; *) fail 'the menu should lead to the stub qemu' ;; esac
@@ -276,10 +277,10 @@ test: build
     [ "$code" -eq 42 ] || fail "choosing “always run” should run the stub qemu, got $code"
     grep -q 'qemu = always' "$PWD/$TMP/home/.config/aosc-exec-guard.conf" \
       || fail 'choosing “always run” should be remembered'
-    ask_pty 'jj\n' # 再下移一项 → 总是不运行（不再询问）
-    [ "$code" -eq 126 ] || fail "choosing “never run” should explain and exit 126, got $code"
-    grep -q 'qemu = never' "$PWD/$TMP/home/.config/aosc-exec-guard.conf" \
-      || fail 'choosing “never run” should be remembered'
+    ask_pty 'jj\n' # 3 项会绕圈：默认(1) → 2 总是运行 → 0 运行（这次）
+    [ "$code" -eq 42 ] || fail "wrapping around the 3-item menu should still run, got $code"
+    [ ! -e "$PWD/$TMP/home/.config/aosc-exec-guard.conf" ] \
+      || fail 'wrapping to “run once” must not be remembered'
     ask_pty 'q'    # q 退出菜单 = 这次不运行（不记住）
     [ "$code" -eq 126 ] || fail "quitting the menu should explain and exit 126, got $code"
     [ ! -e "$PWD/$TMP/home/.config/aosc-exec-guard.conf" ] || fail 'quitting must not be remembered'

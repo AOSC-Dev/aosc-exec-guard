@@ -121,13 +121,9 @@ fn ask_terminal(
 
     eprintln!("aosc-exec-guard: {}", qemu_question(target, info));
 
-    // 以前是 [y/N/a/s]；现在同样的四个答案摆成菜单，默认项仍是“不运行”（和 y/N 一致）。
-    let items = [
-        "运行（这次）",
-        "不运行（这次）",
-        "总是运行（不再询问）",
-        "总是不运行（不再询问）",
-    ];
+    // 以前是 [y/N/a/s]；“总是不运行”不再给菜单入口（要固定成从不运行就手写
+    // `qemu = never` 配置或 `AOSC_EXEC_GUARD_QEMU=never`），默认项仍是“不运行”。
+    let items = ["运行（这次）", "不运行（这次）", "总是运行（不再询问）"];
 
     let choice = Select::new()
         .with_prompt(format!("用 {} 运行吗", entry.name))
@@ -143,10 +139,6 @@ fn ask_terminal(
         },
         Ok(Some(2)) => AskOutcome {
             run: true,
-            remember: true,
-        },
-        Ok(Some(3)) => AskOutcome {
-            run: false,
             remember: true,
         },
         // 1 = “不运行（这次）”；q/Esc 退出、读键失败也都当这次不运行。
