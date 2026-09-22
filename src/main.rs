@@ -10,10 +10,13 @@
 //! for "cannot execute" errors.
 
 use std::env;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{IsTerminal, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
+
+use clap::Parser;
 
 /// Exit status for "found but cannot be executed" (shell convention).
 const EXIT_CANNOT_EXEC: i32 = 126;
@@ -143,7 +146,8 @@ fn classify(path: &Path, native: Option<u16>) -> Verdict {
     }
 }
 
-fn build_message(path: &str, native_label: &str, verdict: &Verdict) -> String {
+fn build_message(path: &Path, native_label: &str, verdict: &Verdict) -> String {
+    let path = path.display();
     match verdict {
         Verdict::ArchMismatch(info) => format!(
             "无法运行“{path}”：该程序是为 {}构建的 {} 位程序，而本机是 {native_label}。\n\
@@ -181,13 +185,50 @@ fn in_service() -> bool {
     env::var_os("INVOCATION_ID").is_some()
 }
 
-fn decide_mode() -> DisplayMode {
-    if env::var_os("AOSC_EXEC_GUARD_NO_DIALOG").is_some() {
+/// 说明一个程序为何无法在本机运行（binfmt_misc 解释器）。
+///
+/// 内核通过 binfmt_misc 调用时为
+/// `aosc-exec-guard <程序路径> <原程序的参数…>`：路径之后的内容一律属于
+/// 原程序，guard 只是原样接受、不当成自己的选项解析。
+#[derive(Debug, Parser)]
+#[command(
+    version,
+    override_usage = "aosc-exec-guard [选项] <程序路径> [参数…]",
+    after_help = "（通常由内核通过 binfmt_misc 调用，无需手动运行。）"
+)]
+struct Cli {
+    /// 无法运行的程序路径（其后的参数原属于原程序）
+    #[arg(
+        value_name = "程序路径",
+        required = true,
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    argv: Vec<OsString>,
+
+    /// 永远不弹框（相当于 AOSC_EXEC_GUARD_NO_DIALOG=1）
+    #[arg(long)]
+    no_dialog: bool,
+
+    /// 打印模式判定等调试信息（相当于 AOSC_EXEC_GUARD_DEBUG=1）
+    #[arg(long)]
+    debug: bool,
+}
+
+/// 环境变量开关按「存在即开启」处理：内核调用时没法给 guard 传选项。
+fn env_switch(key: &str) -> bool {
+    env::var_os(key).is_some()
+}
+
+fn decide_mode(no_dialog: bool) -> DisplayMode {
+    if no_dialog {
         return DisplayMode::Text;
     }
+
     if in_service() || !gui_available() || in_terminal() {
         return DisplayMode::Text;
     }
+
     DisplayMode::Dialog
 }
 
@@ -214,6 +255,7 @@ fn show_dialog(title: &str, body: &str) -> bool {
             ],
         ),
     ];
+
     for (program, args) in attempts {
         let status = Command::new(program)
             .args(&args)
@@ -237,20 +279,20 @@ fn escape_markup(input: &str) -> String {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let Some(target) = args.get(1) else {
-        eprintln!("用法：aosc-exec-guard <程序路径> [参数 …]");
-        eprintln!("（通常由内核通过 binfmt_misc 调用，无需手动运行）");
-        std::process::exit(2);
-    };
+    let cli = Cli::parse();
+    let (target, _program_args) = cli.argv.split_first().expect("clap 保证至少有一个程序路径");
+    let target = Path::new(target);
+
+    let no_dialog = cli.no_dialog || env_switch("AOSC_EXEC_GUARD_NO_DIALOG");
+    let debug = cli.debug || env_switch("AOSC_EXEC_GUARD_DEBUG");
 
     let native = native_machine();
-    let verdict = classify(Path::new(target), native);
+    let verdict = classify(target, native);
     let message = build_message(target, env::consts::ARCH, &verdict);
     eprintln!("aosc-exec-guard: {message}");
 
-    let mode = decide_mode();
-    if env::var_os("AOSC_EXEC_GUARD_DEBUG").is_some() {
+    let mode = decide_mode(no_dialog);
+    if debug {
         eprintln!(
             "[debug] mode={mode:?} gui={} tty={} in_service={}",
             gui_available(),
@@ -319,7 +361,7 @@ mod tests {
             class: ElfClass::Bits64,
             machine: 0xb7,
         });
-        let message = build_message("/tmp/app", "x86_64", &verdict);
+        let message = build_message(Path::new("/tmp/app"), "x86_64", &verdict);
         assert!(message.contains("aarch64"));
         assert!(message.contains("x86_64"));
         assert!(message.contains("64 位"));
@@ -331,14 +373,14 @@ mod tests {
             class: ElfClass::Bits64,
             machine: 0x3e,
         });
-        let message = build_message("/tmp/app", "x86_64", &verdict);
+        let message = build_message(Path::new("/tmp/app"), "x86_64", &verdict);
         assert!(message.contains("损坏"));
     }
 
     #[test]
     fn message_reports_non_elf() {
         let verdict = Verdict::NotElf("文件不是 ELF 可执行文件");
-        let message = build_message("/tmp/app", "x86_64", &verdict);
+        let message = build_message(Path::new("/tmp/app"), "x86_64", &verdict);
         assert!(message.contains("不是 ELF"));
     }
 

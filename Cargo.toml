@@ -6,6 +6,16 @@ description = "binfmt_misc guard PoC: explain why an executable cannot run"
 license = "GPL-3.0-or-later"
 
 [dependencies]
+# Only for argument parsing; color support is pointless for a binfmt
+# interpreter whose stderr goes to logs and dialog callers.
+clap = { version = "4", default-features = false, features = [
+    "std",
+    "help",
+    "usage",
+    "error-context",
+    "suggestions",
+    "derive",
+] }
 
 [profile.release]
 strip = true

@@ -30,12 +30,13 @@
   - 读 ELF 头（只读前 20 字节），区分三种情况：外来架构 / 本机架构（本不该被条目命中，防呆）/ 根本不是 ELF；
   - 输出解释到 stderr；如果是从图形会话启动（有 `DISPLAY`/`WAYLAND_DISPLAY`，且 stdout/stderr 都不是终端，也不是 systemd 服务），再调 `zenity`/`kdialog` 弹框；
   - 退出码 126，保持 shell 对"找到但无法执行"的惯例。
-- 开关：`AOSC_EXEC_GUARD_NO_DIALOG=1` 永远不弹框；`AOSC_EXEC_GUARD_DEBUG=1` 打印决策信息（测试用）。
+- 开关：`--no-dialog` / `--debug`（等同 `AOSC_EXEC_GUARD_NO_DIALOG=1` / `AOSC_EXEC_GUARD_DEBUG=1`，环境变量存在即开启）。内核调用时命令行只能是"程序路径 + 原程序参数"，没法给 guard 传选项，所以环境变量是内核路径下唯一可用的开关；命令行选项只服务于手动运行。
+- 命令行解析用 clap：`aosc-exec-guard [选项] <程序路径> [参数…]`——路径之后的参数一律原样保留，`--debug`、`--help` 之类不会被 guard 抢去解析（它们本来就属于原程序）。
 
 ## 目录
 
 ```
-src/main.rs                  guard 本体（无第三方依赖）
+src/main.rs                  guard 本体（Rust；只用 clap 做命令行解析）
 data/binfmt.d/*.conf         /usr/lib/binfmt.d/ 用的注册项（一架构一个）
 scripts/test.sh              本地测试（无 root）：单测 + 直测 + stub zenity 弹框分支
 scripts/get-test-binary.sh   下载真实的 aarch64 静态二进制（Alpine busybox-static）

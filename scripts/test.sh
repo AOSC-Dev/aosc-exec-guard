@@ -64,6 +64,42 @@ printf '%s\nexit=%s\n' "$out" "$code"
 [ "$code" -eq 126 ] || fail "exit code should be 126, got $code"
 case "$out" in *ELF*) ;; *) fail 'message should mention ELF' ;; esac
 
+step 'CLI: --help / --version / missing target'
+"$GUARD" --help >/dev/null || fail '--help should exit 0'
+"$GUARD" --version >/dev/null || fail '--version should exit 0'
+set +e
+"$GUARD" >/dev/null 2>&1
+code=$?
+set -e
+[ "$code" -eq 2 ] || fail "missing target should exit 2 (usage error), got $code"
+
+step 'CLI: --debug is recognised before the program path'
+set +e
+out=$(run_guard --debug "$TMP/not-an-elf" 2>&1)
+code=$?
+set -e
+[ "$code" -eq 126 ] || fail "exit code should be 126, got $code"
+case "$out" in *'[debug] mode='*) ;; *) fail '--debug before the path should print the decision' ;; esac
+
+step 'CLI: kernel-style arguments stay pass-through'
+# binfmt_misc appends the original program's arguments; they must never be
+# parsed as guard options.
+set +e
+out=$(run_guard "$TMP/not-an-elf" --debug --help -l 你好 2>&1)
+code=$?
+set -e
+[ "$code" -eq 126 ] || fail "pass-through arguments should still exit 126, got $code"
+case "$out" in *'[debug]'*) fail '--debug after the path must not reach the guard' ;; esac
+case "$out" in *'Usage:'*) fail '--help after the path must not show the guard help' ;; esac
+
+step 'CLI: non-UTF-8 argument does not break the guard'
+set +e
+out=$(run_guard "$TMP/not-an-elf" "$(printf '\xff')" 2>&1)
+code=$?
+set -e
+[ "$code" -eq 126 ] || fail "non-UTF-8 argument should still exit 126, got $code"
+case "$out" in *ELF*) ;; *) fail 'explanation should still be printed' ;; esac
+
 step 'dialog branch (stub zenity, no window is opened)'
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/zenity" <<'STUB'
