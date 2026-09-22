@@ -116,8 +116,10 @@ fn hand_over(assume_yes: bool) -> Result<(), String> {
     if !left.is_empty() {
         return Err(format!("注销之后还有残留条目：{}", left.join("、")));
     }
+
     println!("让位完成：外架构程序现在由内核的 qemu 条目处理（宿主机、chroot、容器 都一样）。");
     println!("恢复：`sudo aosc-exec-guard --handover=off`，或重新运行安装脚本。");
+
     Ok(())
 }
 
