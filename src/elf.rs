@@ -186,9 +186,9 @@ pub fn build_message(
                 // 宿主机注册的条目在 chroot 里照样会命中；但 guard 找模拟器时
                 // 必须在 rootfs 里看到那个文件（F 只让内核重用注册时打开的
                 // 解释器文件，guard 转发时 exec 的仍然是路径）。
-                None if in_chroot() => "提示：看起来是在 chroot 里：模拟器在本 rootfs 里要能找到\
-                                        （把静态的 qemu-*-static 拷进 /usr/bin 即可），\
-                                        或者到 chroot 外面运行。"
+                None if in_chroot() => "提示：看起来是在 chroot 里：这里看不到可用的模拟器条目\
+                                        （guard 只认 binfmt_misc 注册表；宿主机的条目要挂上 /proc 才看得见），\
+                                        可以到 chroot 外面运行。"
                     .to_string(),
                 None => "提示：可以安装对应架构的模拟器（qemu-user-static、box64 等）后重试，\
                          或改用 AOSC OS 原生版本。"

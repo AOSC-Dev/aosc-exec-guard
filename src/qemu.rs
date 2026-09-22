@@ -1,7 +1,8 @@
 //! 模拟器（qemu-user）的发现与转发。
 //!
-//! 正常路径是读 binfmt_misc 注册表；看不到注册表时（chroot / 容器里很常见）
-//! 依次退回：宿主机的注册表（`/proc/1/root`）、rootfs 里的约定路径。
+//! 只认 binfmt_misc 注册表：先看本进程可见的那份；看不到时（chroot / 容器里
+//! 很常见）退回宿主机的注册表（`/proc/1/root`）。不猜 `/usr/bin/qemu-*` 之类
+//! 的路径——两边都说没有就返回 None，由调用方解释退出。
 
 use std::env;
 use std::ffi::OsString;
@@ -63,14 +64,14 @@ pub struct QemuEntry {
 }
 
 /// 找一个已启用、且解释器还在的 qemu 条目。
+///
+/// 只认注册表：本进程看得见就用本地那份；看不见（chroot / 容器里很常见）就
+/// 借宿主机的那份。两边都没有就返回 None——不做路径猜测。
 pub fn find_qemu_entry(info: &ElfInfo) -> Option<QemuEntry> {
-    let dir = binfmt_dir();
-    // 注册表能读到就以它为准：没注册、被禁用的条目不该被绕过。
     if registry_visible() {
-        return find_qemu_entry_in(&dir, info);
+        return find_qemu_entry_in(&binfmt_dir(), info);
     }
-    // 看不到注册表（chroot / 容器里很常见）：能找到能用的模拟器就行。
-    find_host_qemu_entry(info).or_else(|| find_conventional_qemu(info))
+    find_host_qemu_entry(info)
 }
 
 /// 本进程能看到 binfmt_misc 注册表吗——挂载点里有 `register` 文件才算数。
@@ -96,9 +97,10 @@ fn find_qemu_entry_in(dir: &Path, info: &ElfInfo) -> Option<QemuEntry> {
     })
 }
 
-/// 宿主机注册表（经由 `/proc/1/root`）：chroot 里条目带 `F` 时，内核执行的就是
-/// 宿主机上那份解释器文件，照着它转发最忠实。读不到（没挂 /proc、权限不够）
-/// 就返回 None，交给下面的约定路径。
+/// 宿主机注册表（经由 `/proc/1/root`）：只在**共享 PID namespace** 时才真的是
+/// “宿主机”的（普通 chroot 是；nspawn 这类容器里 /proc/1 是容器自己的 init，
+/// 借不到宿主条目）。chroot 里条目带 `F` 时，内核执行的就是宿主机那份解释器
+/// 文件，照着它转发最忠实。读不到（没挂 /proc、权限不够）就返回 None。
 fn find_host_qemu_entry(info: &ElfInfo) -> Option<QemuEntry> {
     let base = Path::new("/proc/1/root");
     let dir = base.join("proc/sys/fs/binfmt_misc");
@@ -108,26 +110,6 @@ fn find_host_qemu_entry(info: &ElfInfo) -> Option<QemuEntry> {
         // 在 chroot 里得经由 /proc/1/root 才能执行到宿主机那份。
         entry.interpreter = base.join(entry.interpreter.strip_prefix("/").ok()?);
         entry.interpreter.is_file().then_some(entry)
-    })
-}
-
-/// 约定路径兜底：rootfs 里放了模拟器（qemu-debootstrap 式玩法）又没有注册表可看时，
-/// 按名字找 `/usr/bin/qemu-<架构>[-static]`。条目里的 flag 无从得知，
-/// 按最常见的布局（不加参数）转发。
-fn find_conventional_qemu(info: &ElfInfo) -> Option<QemuEntry> {
-    qemu_entry_names(info).iter().find_map(|name| {
-        [
-            format!("/usr/bin/{name}-static"),
-            format!("/usr/bin/{name}"),
-        ]
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| path.is_file())
-        .map(|interpreter| QemuEntry {
-            name: name.to_string(),
-            interpreter,
-            flags: String::new(),
-        })
     })
 }
 

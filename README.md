@@ -121,27 +121,31 @@ binfmt_misc 条目是**宿主**注册的（严格说，是**用户命名空间**
 guard 认得自己在不在 chroot（比较 `/` 与 `/proc/1/root`）；**看不到 binfmt_misc 注册表时也一并按“让位”处理**（没挂 /proc 的 chroot、容器里就是这样）：那时既没法可靠判断自己在哪，也没法知道内核会怎么处理这个文件。这些环境里它的行为刻意和宿主机不同——**宿主机上的选择、以及“要不要问”本身，都不该带进来**：
 
 - **不问、不带宿主机配置**：忽略 `~/.config/aosc-exec-guard.conf` 里“不再询问”记住的选择（即使那个文件看得见），也不弹询问框（终端里也不会出菜单）；默认直接交给模拟器，让环境里的行为等于**没装 guard 时的行为**。
-- **找不到就解释**（并提示“模拟器在本 rootfs 里要能找到”）。
+- **找不到就解释**（并提示：guard 只认注册表，宿主机条目要挂上 /proc 才看得见）。
 - 命令行 `--qemu=never|always|ask` 和 `AOSC_EXEC_GUARD_QEMU` 仍然算数：是你显式下的指令，不会被忽略（想在没挂 /proc 的 chroot 里手动要个菜单，就显式写 `--qemu=ask`）。
 
-找不到 binfmt_misc 注册表时（chroot 里很常见），guard 按这个顺序找模拟器：
+找不到 binfmt_misc 注册表时（chroot 里很常见），guard **只往宿主机的注册表再问一次**，不猜路径：
 
 1. 进程自己看得到的注册表（rootfs 里挂了 binfmt_misc 时；**挂好了就以它为准**，被禁用的条目不会被绕过）；
-2. **宿主机的注册表**：`/proc/1/root/proc/sys/fs/binfmt_misc`——`F` 语义下内核用的就是宿主机那份解释器，照着它转发最忠实（需要 /proc 和权限）；
-3. rootfs 里的**约定路径** `/usr/bin/qemu-<架构>[-static]`（qemu-debootstrap 式玩法；没有条目可读时按最常见的参数布局转发）。
+2. **宿主机的注册表**：`/proc/1/root/proc/sys/fs/binfmt_misc`——`F` 语义下内核用的就是宿主机那份解释器，照着它转发最忠实（需要 /proc 和权限；**只在共享 PID namespace 时才是“宿主机的”**，见下文“容器”一段）。
 
-于是 chroot 里的体验：rootfs 里有模拟器（或宿主机条目可用）→ 外架构程序照常跑；都没有 → guard 解释原因（并提示该把模拟器放到哪）。
+两边注册表都说没有，就直接解释退出（不会去看 `/usr/bin/qemu-*` 存不存在）。
 
-一个诚实的残留：**既没挂 /proc、rootfs 里又没有任何模拟器**的 chroot（比如 `chroot /mnt/xx /bin/sh` 这种临时进去看看的用法）——这种 chroot 里内核本来会用宿主机那份 `F` 解释器把程序跑起来，但 guard 接住后，因为 /proc 不在、rootfs 里也没有模拟器，**没有任何可达的路径可以转发**，只能解释（退 126）。想让这种 chroot 也正常工作，就在 rootfs 里放一份静态 `qemu-*-static`（或静态 guard，见下）。
+于是 chroot 里的体验：rootfs 自己挂了注册表、或者 /proc 在（能借到宿主机条目）→ 外架构程序照常跑；否则 guard 解释原因。
+
+**容器（有自己的 PID namespace，比如 `systemd-nspawn`）另当别论**：`/proc/1/root` 这时指向**容器自己的 init**，借不到宿主机的条目，所以容器里 guard 会直接解释（实测：同一个 busybox，装 guard 前靠内核的宿主机 `F` 条目能跑出 `aarch64`，装 guard 后变成 126；`systemd-nspawn --bind=/proc/sys/fs/binfmt_misc` 也不顶用——它会自己挂新的 /proc）。容器里要能用，得让它**自足**：容器自己挂上 binfmt_misc（systemd 容器默认就会挂）**并且**容器里有对应架构的静态 `qemu-*-static`——实测这时 `registry=visible`、guard 能发现条目并照常询问/转发。
+
+排查这类问题可以用 `--debug`：它会打印 `mode` / `qemu` 条目 / `registry=visible|invisible` / tty 等判定条件。
+
+一个诚实的残留：**既没挂 /proc、自己的注册表里也没有可用条目**的 chroot（比如 `chroot /mnt/xx /bin/sh` 这种临时用法）——这种 chroot 里内核本来会用宿主机那份 `F` 解释器把程序跑起来，但 guard 接住后，两边注册表都看不见/没有条目，**没有任何可达的路径可以转发**，只能解释（退 126）。guard 不会去猜 `/usr/bin/qemu-*`，所以往 rootfs 里放模拟器二进制并不能改变这一点；要么把 /proc 挂上，要么到 chroot 外面运行。
 
 自己的构建怎么选：
 
 ```console
 # 路线 1（推荐）：guard 静态构建——chroot 里零拷贝直接可用（F 会把宿主机那份拿进来），
-# 再往 rootfs 里放一份静态模拟器，“找模拟器”的第 3 条就能命中。
+# 只要 chroot 里挂了 /proc，就能借到宿主机的模拟器条目。
 $ just build-static     # 输出 target/static/aosc-exec-guard（static-pie）
 $ sudo just install     # 装静态版；或手动 install -Dm755 target/static/aosc-exec-guard /usr/bin/aosc-exec-guard
-$ sudo install -Dm755 /usr/bin/qemu-aarch64-static /path/to/rootfs/usr/bin/qemu-aarch64-static
 
 # 路线 2：动态构建 + 连库一起拷进 rootfs（ld.so 和库按 rootfs 的根解析）
 $ ldd target/release/aosc-exec-guard   # 照着把 ld.so 和各库拷到 rootfs 的同一路径
@@ -149,7 +153,7 @@ $ ldd target/release/aosc-exec-guard   # 照着把 ld.so 和各库拷到 rootfs 
 
 （还有一种“把同意状态存进内核注册表”的思路：同意时注销 guard 条目、直接注册真解释器。它能彻底让 guard 在 chroot 里不出现，但需要 root 权限动注册表、重启后要由 `/usr/lib/binfmt.d` 之类的文件重放，且“总是不运行”没法用“注销自身”表达；本仓库先走上面的“让位”。）
 
-`just kernel-test` 会真的 chroot 一遍验证整条链路（动态解释器先报 ENOENT、补上库就能解释并认出 chroot；rootfs 里有约定路径的模拟器 / 宿主机条目可用时直接转发；静态解释器 + `F` 时空 rootfs 也能解释）。
+`just kernel-test` 会真的 chroot 一遍验证整条链路（动态解释器先报 ENOENT、补上库就能解释并认出 chroot；能从 `/proc/1/root` 借到宿主机条目时直接让位转发（真程序 busybox 也跑一遍）；静态解释器 + `F` 时空 rootfs 也能解释）。
 
 ## 内核端到端测试做了什么
 
@@ -157,7 +161,7 @@ $ ldd target/release/aosc-exec-guard   # 照着把 ld.so 和各库拷到 rootfs 
 2. 注册后立刻用 `/usr/bin/true` 冒烟：本机程序必须还能跑，否则立即中止并清理；
 3. 同时保留 `qemu-aarch64` 条目，观察两者谁先匹配（注册顺序语义实测）；
 4. 暂时禁用 `qemu-aarch64`，跑一个伪造的 aarch64 ELF 和（若已下载）真实 busybox，检查解释文本与退出码 126；
-5. chroot 一遍：宿主条目照样命中（`F` 让内核用注册时打开的解释器；动态解释器还差 rootfs 里的 ld.so → ENOENT），补上库后能解释、认出 chroot 并改提示；rootfs 里有约定路径的模拟器、或能从 `/proc/1/root` 借到宿主机条目时，直接让位转发（真程序 busybox 也跑一遍）；
+5. chroot 一遍：宿主条目照样命中（`F` 让内核用注册时打开的解释器；动态解释器还差 rootfs 里的 ld.so → ENOENT），补上库后能解释、认出 chroot 并改提示；能从 `/proc/1/root` 借到宿主机条目时直接让位转发（真程序 busybox 也跑一遍）；
 6. 把 `AOSC_EXEC_GUARD_QEMU=always` 交给真实的 `binfmt_misc` 调用链，让 busybox 经 guard → qemu 跑起来（`uname -m` 输出 aarch64）；
 7. 恢复 `qemu-aarch64`、注销 guard，确认原来的模拟器行为回来。
 

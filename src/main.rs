@@ -34,7 +34,7 @@ use crate::platform::{
     DisplayMode, decide_mode, env_switch, gui_available, in_service, in_terminal,
 };
 use crate::prompt::{ask_run_via_qemu, show_dialog};
-use crate::qemu::{find_qemu_entry, run_via_qemu};
+use crate::qemu::{find_qemu_entry, registry_visible, run_via_qemu};
 
 /// Exit status for "found but cannot be executed" (shell convention).
 const EXIT_CANNOT_EXEC: i32 = 126;
@@ -64,7 +64,7 @@ struct Cli {
     #[arg(long)]
     no_dialog: bool,
 
-    /// 打印模式判定等调试信息（相当于 AOSC_EXEC_GUARD_DEBUG=1）
+    /// 打印模式判定等调试信息（含 binfmt 注册表可见性；相当于 AOSC_EXEC_GUARD_DEBUG=1）
     #[arg(long)]
     debug: bool,
 
@@ -92,8 +92,13 @@ fn main() {
     let mode = decide_mode(no_dialog);
     if debug {
         eprintln!(
-            "[debug] mode={mode:?} qemu={} qemu_mode={qemu_mode:?} gui={} tty={} in_service={}",
+            "[debug] mode={mode:?} qemu={} qemu_mode={qemu_mode:?} registry={} gui={} tty={} in_service={}",
             qemu_entry.as_ref().map_or("-", |entry| entry.name.as_str()),
+            if registry_visible() {
+                "visible"
+            } else {
+                "invisible"
+            },
             gui_available(),
             in_terminal(),
             in_service(),
