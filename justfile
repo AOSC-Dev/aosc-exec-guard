@@ -1,7 +1,7 @@
 # aosc-exec-guard：开发 / 测试 / 安装入口（原先 scripts/*.sh 的内容都在这里）
 #
 #   just                            # 列出配方
-#   just build                      # 静态构建（有 musl target 用 musl，否则 glibc 静态）
+#   just build                      # 静态构建（musl；std 由 rust-toolchain.toml 备好）
 #   just test                       # 本地全套检查（无 root）
 #   sudo just kernel-test           # 内核端到端（注册 binfmt 条目，结束自动清理）
 #   sudo just systemd-install-test  # 真实安装路径（/usr/lib/binfmt.d + systemd-binfmt）
@@ -18,8 +18,9 @@ default:
     @just --list
 
 # 构建：唯一的 release 二进制，全静态（要拷进空 rootfs / 容器 里直接用，不能带 libc）。
-# 机器上有 musl target 就用 musl；没有就退回 glibc + crt-static（也是静态）。
-# 产物统一在 target/static/aosc-exec-guard——conf 里的 /usr/bin/aosc-exec-guard 就是它。
+# 直接按当前宿主机选 musl triple；std 由 rust-toolchain.toml 保证装好，
+# 真缺了就让它报错（不再回退 glibc）。
+# 产物固定在 target/static/aosc-exec-guard——conf 里的 /usr/bin/aosc-exec-guard 就是它。
 build:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -28,19 +29,8 @@ build:
       *-musl) triple=$host ;;
       *) triple=${host%-gnu}-musl ;;   # x86_64-unknown-linux-gnu → …-linux-musl
     esac
-    # 有 musl 的 std 就用 musl（不依赖 rustup：发行版自带 rust-std-musl 也算）
-    libdir=$(rustc --print target-libdir --target "$triple" 2>/dev/null || true)
-    if [ -n "$libdir" ] && [ -d "$libdir" ]; then
-      cargo build --release --target "$triple"
-      bin="target/$triple/release/aosc-exec-guard"
-      echo "（musl 静态构建：$triple）"
-    else
-      # 必须带 --target：不带的话 RUSTFLAGS 会连 proc-macro（clap_derive）一起影响，编不出来。
-      RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target "$host"
-      bin="target/$host/release/aosc-exec-guard"
-      echo "（glibc 静态构建；想用 musl：rustup target add $triple）"
-    fi
-    install -Dm755 "$bin" target/static/aosc-exec-guard
+    cargo build --release --target "$triple"
+    install -Dm755 "target/$triple/release/aosc-exec-guard" target/static/aosc-exec-guard
     file target/static/aosc-exec-guard
 
 # 代码检查：rustfmt + clippy

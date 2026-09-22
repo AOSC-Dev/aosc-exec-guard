@@ -54,6 +54,7 @@ src/prompt.rs                询问：zenity/kdialog 弹框、dialoguer 终端�
 src/platform.rs              环境判定：终端 / 图形 / systemd 服务 / chroot
 src/config.rs                设置：--qemu、AOSC_EXEC_GUARD_QEMU、用户配置的优先级与读写
 justfile                     开发/测试/安装入口（just / just test / sudo just install …）
+rust-toolchain.toml         rustup：stable + 各主架构的 musl 标准库（静态构建用）
 scripts/install.sh           安装/卸载脚本（just install 就是调它；打包可直接调，不必依赖 just）
 data/binfmt.d/zz-aosc-exec-guard.conf.in  规则模板（全集，22 条，抄自 qemu）；安装时由安装脚本过滤成 /usr/lib/binfmt.d/zz-aosc-exec-guard.conf
 ```
@@ -167,7 +168,7 @@ guard 就**把自己从路径里拿掉**：注销全部 `aosc-exec-guard-*` 条�
 
 另外注意“**guard 能跑起来 ≠ 能把程序跑起来**”：静态 guard + `F` 可以让 guard 进程在空 rootfs 里启动并给出解释，但目标程序还是要靠模拟器——空 rootfs 里没有任何可达的模拟器，guard 一样转不了（这正是 `--handover` 存在的理由）。
 
-构建：**只有静态版**——`just build` 输出 `target/static/aosc-exec-guard`（有 musl target 就用 musl，否则 glibc + `crt-static`，都是全静态）。装进 `F` 条目的就是它，chroot / 容器 里零拷贝直接可用。动态构建已经删掉：它进了 chroot / 容器 还得连 `ld.so` 和库一起拷（等于把宿主的库带进目标系统），恰恰在最需要它跑起来的地方跑不了。
+构建：**只有静态版，而且就是 musl 静态**——仓库根的 `rust-toolchain.toml` 声明了 stable + 各主架构的 musl 标准库（rustup 装工具链时一并备好），`just build` 按当前宿主机选对应的 musl triple，输出 `target/static/aosc-exec-guard`。装进 `F` 条目的就是它，chroot / 容器 里零拷贝直接可用。动态构建已经删掉：它进了 chroot / 容器 还得连 `ld.so` 和库一起拷（等于把宿主机库带进目标系统），恰恰在最需要它跑起来的地方跑不了。
 
 ```console
 $ just build             # 输出 target/static/aosc-exec-guard
