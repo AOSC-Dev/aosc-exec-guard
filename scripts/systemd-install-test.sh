@@ -23,7 +23,6 @@ case "$(uname -m)" in
   aarch64|arm64) echo '本机是 aarch64：跳过（条目会劫持解释器自身）' >&2; exit 1;;
 esac
 
-CONF_SRC=$PWD/data/binfmt.d/zz-aosc-exec-guard.conf
 CONF_DST=/usr/lib/binfmt.d/zz-aosc-exec-guard.conf
 GUARD=$PWD/target/release/aosc-exec-guard
 [ -x "$GUARD" ] || { echo "找不到 $GUARD；请先运行 scripts/test.sh" >&2; exit 1; }
@@ -69,9 +68,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-step '安装 conf（模拟打包安装，把解释器指到本仓库构建的二进制）'
-# 注意：F 标志要求解释器文件在注册时就存在（正式打包时即 /usr/bin/aosc-exec-guard）。
-sed "s|/usr/bin/aosc-exec-guard|$GUARD|" "$CONF_SRC" > "$CONF_DST"
+step '安装 conf（走 scripts/install.sh 生成过滤后的 conf，模拟打包安装）'
+# install.sh 会按本机家族删掉本机架构的规则（不删的话条目会劫持解释器自身）。
+# F 标志要求解释器文件在注册时就存在（这里指向本仓库构建的二进制）。
+PKG=$(mktemp -d)
+scripts/install.sh --prefix "$PKG" > /dev/null
+sed "s|/usr/bin/aosc-exec-guard|$GUARD|" "$PKG/lib/binfmt.d/zz-aosc-exec-guard.conf" > "$CONF_DST"
+rm -rf "$PKG"
 chmod 644 "$CONF_DST"
 systemctl restart systemd-binfmt.service
 show_entry aosc-exec-guard-aarch64
@@ -83,6 +86,21 @@ for arch in aarch64 arm loongarch64 riscv64 alpha; do
   fi
 done
 printf '  （一个 conf 文件里的多条规则全部注册：aarch64/arm/loongarch64/riscv64/alpha …）\n'
+# 注册后立刻冒烟：本机必须还能跑原生程序（万一过滤漏了本机架构，这里会 ELOOP）
+if ! /usr/bin/true 2>/dev/null; then
+  echo 'FAIL: 注册后本机无法执行程序，立刻用内建命令撤销 guard 条目' >&2
+  while IFS= read -r line; do
+    case "$line" in
+      :aosc-exec-guard-*) ;;
+      *) continue ;;
+    esac
+    name=${line#:}
+    name=${name%%:*}
+    [ -e "$BM/$name" ] && echo -1 > "$BM/$name"
+  done < "$CONF_DST"
+  exit 1
+fi
+echo '  （本机程序执行正常）'
 
 step '运行时优先级：服务刚注册的 guard vs 开机时的 qemu'
 probe

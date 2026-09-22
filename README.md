@@ -10,15 +10,15 @@
 
 - **`binfmt_misc` 条目在每次 exec 时都会被先行匹配**（先于 `binfmt_elf`）。命中后文件直接交给条目的解释器，不再尝试原生加载。
 - 因此，条目必须**按目标架构精确匹配**（和 qemu 的 conf 一个套路：用 magic/mask 钉死 ELF 位宽、字节序、`e_machine`、`ET_EXEC|ET_DYN`）；**绝不能**用"匹配所有 ELF"的万能条目——它会把解释器自身（同样是 ELF）也劫持进去，内核的解释器递归到达上限后返回 `ELOOP`，导致全系统无法再启动新程序（见"踩坑记录"）。条目也绝不能匹配**本机架构**，因为 guard 自己就是本机架构。
-- 所以本仓库是"一个架构一条规则"，但装在**一个** conf 文件里（`man binfmt.d`：一个文件就是"一串规则"，systemd-binfmt 逐行注册，注释行 `#`/`;` 忽略——实测有效）：
+- 所以本仓库是"一个架构一条规则"，但都是**一个** conf 文件里的一行（`man binfmt.d`：一个文件就是"一串规则"，systemd-binfmt 逐行注册，注释行 `#`/`;` 忽略——实测有效）：
 
   ```
-  data/binfmt.d/zz-aosc-exec-guard.conf   # 20 条规则：aarch64/arm/armeb/riscv64/loongarch64/
+  data/binfmt.d/zz-aosc-exec-guard.conf   # 22 条规则：i386/x86_64/aarch64/arm/armeb/riscv64/loongarch64/
                                           #   mips{,64el,el}/ppc{,64,64le}/s390x/sh4{,eb}/
                                           #   sparc{,32plus,64}/alpha/m68k/microblaze
   ```
 
-  规则里的 magic/mask **逐字节抄自 AOSC OS 的 qemu-user 包**（`/usr/lib/binfmt.d/qemu-*.conf`），只把条目名和解释器换成本程序——以后要覆盖新架构，从 qemu 的 conf 里再抄一行即可。
+  规则里的 magic/mask **逐字节抄自 AOSC OS 的 qemu-user 包**（`/usr/lib/binfmt.d/qemu-*.conf`，20 条），i386/x86_64 两条按同一模板补上（qemu 上游也有，本机因为是 x86_64 被它自己的安装器过滤掉了）——集合要全，别的主机才能拿它解释 amd64 程序。以后要覆盖新架构，从 qemu 的 conf/上游脚本里再抄一行即可。
 
   `zz-` 前缀不是随手起的：systemd-binfmt 按文件名排序应用 conf、后应用者优先（实测），`zz-` 让 guard 排在 `qemu-*` 之后 → **guard 先接住外来架构的程序**，再由它决定要不要交给模拟器（见下）。
 
@@ -28,7 +28,7 @@
   :aosc-exec-guard-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/aosc-exec-guard:F
   ```
 
-  （打包/安装时注意：**删掉与目标机器架构相同的那些规则**——如 aarch64 机器上删掉 `-aarch64:` 那一行。装上本机架构的规则会让条目劫持 guard 自身 → `ELOOP` → 全系统起不了新程序；qemu 的包本身也是按架构过滤后才装进系统的。本文件是在 x86_64 机器上抄的，里面没有 x86_64/i386 规则，本机直接装即可。）
+  **装不到本机架构的规则上去**（会劫持解释器自身 → `ELOOP` → 全系统起不了新程序），但不用手工去删：`scripts/install.sh` 按 qemu 的 `qemu-binfmt-conf.sh` **同一套“家族”表**过滤（amd64 上删 i386+x86_64、aarch64 上删 arm+aarch64、mips64 上删 mips 一族…），装到 `/usr` 后还会拿 `/usr/bin/true` 做 exec 冒烟测试，万一过滤漏了它会用内建命令立刻撤销并报错。所以**一份 conf 就够，不需要为每个目标架构各存一份**；打成包时用 `scripts/install.sh --prefix <目录>`（交叉打包加 `--host-arch`）。
 - `aosc-exec-guard` 的工作：
   - 读 ELF 头（只读前 20 字节），区分三种情况：外来架构 / 本机架构（本不该被条目命中，防呆）/ 根本不是 ELF；
   - 输出解释到 stderr；如果是从图形会话启动（有 `DISPLAY`/`WAYLAND_DISPLAY`，且 stdout/stderr 都不是终端，也不是 systemd 服务），再调 `zenity`/`kdialog` 弹框；
@@ -46,7 +46,8 @@
 ```
 src/main.rs                  guard 本体（Rust；只用 clap 做命令行解析）
 data/binfmt.d/zz-aosc-exec-guard.conf  /usr/lib/binfmt.d/ 用的注册项（一个文件，20 条按架构的规则，抄自 qemu）
-scripts/test.sh              本地测试（无 root）：单测 + 直测 + stub zenity 弹框 / stub qemu 的询问转发分支
+scripts/test.sh              本地测试（无 root）：单测 + 直测 + stub zenity 弹框 / stub qemu 的询问转发分支 + installer
+scripts/install.sh           安装/卸载（按本机家族过滤规则；--prefix 供打包，--host-arch 供交叉打包）
 scripts/get-test-binary.sh   下载真实的 aarch64 静态二进制（Alpine busybox-static）
 scripts/kernel-test.sh       内核端到端测试（需要 root，自动清理/恢复）
 scripts/systemd-install-test.sh 真实安装路径测试（/usr/lib/binfmt.d/ + systemd-binfmt，需要 root）
@@ -58,6 +59,17 @@ scripts/systemd-install-test.sh 真实安装路径测试（/usr/lib/binfmt.d/ + 
 
 ```console
 $ scripts/test.sh
+```
+
+装到系统（需要 root；会重启 systemd-binfmt 并做 exec 冒烟测试，失败自动撤销）：
+
+```console
+$ sudo scripts/install.sh
+# 卸载
+$ sudo scripts/install.sh --uninstall
+# 打包/暂存目录（不碰内核）
+$ scripts/install.sh --prefix /tmp/pkg            # 目标就是本机架构
+$ scripts/install.sh --prefix /tmp/pkg --host-arch aarch64   # 交叉打包
 ```
 
 可选的真实 aarch64 二进制：
@@ -111,6 +123,7 @@ $ rm -f ~/.config/aosc-exec-guard.conf
 6. **打包注意**：conf 带 `F` 标志 → 注册时解释器文件必须已存在（试过不存在的路径，服务直接报 `No such file or directory` 注册失败）；二进制和 conf 在同一包里安装没问题。
 7. **端到端行为**：伪造和真实的 aarch64 ELF 都被 guard 接管（中文解释 + 退出码 126）；禁用/恢复 qemu、条目清理均验证通过。
 8. **一个 conf 文件可以放多条规则**：`man binfmt.d` 原文是 "Each file contains a list of binfmt_misc kernel binary format rules"，systemd-binfmt 逐行注册、`#`/`;` 开头的注释行忽略（实测：一个文件里两行规则同时注册成功，删掉文件重启后对应条目消失）。
+9. **本机架构怎么排除**：不需要为每个目标架构各存一份 conf。qemu 上游（`qemu-binfmt-conf.sh`）是按 CPU **家族**过滤的——i386+x86_64 一族、arm+aarch64 一族、mips 全族、ppc/ppc64 一族、sparc 全族等，`--ignore-family yes` 用于同家族但本机跑不了的目标（如 riscv64 上的 riscv32）；`scripts/install.sh` 抄的就是这套表，实测：本机 x86_64 装完剩 20 条（去掉 i386+x86_64），`--host-arch aarch64` 则去掉 arm+aarch64、保留 x86_64。
 
 ## 踩坑记录（2026-09-22，实测）
 

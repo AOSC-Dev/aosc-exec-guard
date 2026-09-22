@@ -108,6 +108,43 @@ set -e
 [ "$code" -eq 126 ] || fail "non-UTF-8 argument should still exit 126, got $code"
 case "$out" in *ELF*) ;; *) fail 'explanation should still be printed' ;; esac
 
+step 'installer: 按家族过滤规则（可交叉打包）'
+# x86_64 目标：整个 i386 家族（i386 + x86_64）都不该留下
+scripts/install.sh --prefix "$TMP/pkg-x86_64" --host-arch x86_64 > "$TMP/install.log" 2>&1 \
+  || fail "installer 在 x86_64 目标上失败：$(cat "$TMP/install.log")"
+conf=$TMP/pkg-x86_64/lib/binfmt.d/zz-aosc-exec-guard.conf
+[ -x "$TMP/pkg-x86_64/bin/aosc-exec-guard" ] || fail 'installer 没装二进制'
+case "$(cat "$conf")" in
+  *':aosc-exec-guard-i386:'*|*':aosc-exec-guard-x86_64:'*)
+    fail 'x86_64 目标的 conf 里不该有 i386/x86_64 规则'
+    ;;
+esac
+case "$(cat "$conf")" in
+  *':aosc-exec-guard-aarch64:'*) ;;
+  *) fail 'x86_64 目标的 conf 里应保留 aarch64 规则' ;;
+esac
+# aarch64 目标：arm 家族（arm + aarch64）都不该留下，x86_64 要留着
+scripts/install.sh --prefix "$TMP/pkg-aarch64" --host-arch aarch64 > /dev/null 2>&1 \
+  || fail 'installer 在 aarch64 目标上失败'
+conf=$TMP/pkg-aarch64/lib/binfmt.d/zz-aosc-exec-guard.conf
+case "$(cat "$conf")" in
+  *':aosc-exec-guard-arm:'*|*':aosc-exec-guard-aarch64:'*)
+    fail 'aarch64 目标的 conf 里不该有 arm/aarch64 规则'
+    ;;
+esac
+case "$(cat "$conf")" in
+  *':aosc-exec-guard-x86_64:'*) ;;
+  *) fail 'aarch64 目标的 conf 里应保留 x86_64 规则' ;;
+esac
+# 默认（本机架构）：自检和过滤都不应该报错
+scripts/install.sh --prefix "$TMP/pkg" > /dev/null || fail 'installer 在本机架构上失败'
+conf=$TMP/pkg/lib/binfmt.d/zz-aosc-exec-guard.conf
+echo "本机 $(uname -m)：过滤后剩 $(grep -c '^:' "$conf") 条规则"
+# 卸载
+scripts/install.sh --prefix "$TMP/pkg" --uninstall > /dev/null || fail 'uninstall 失败'
+[ ! -e "$conf" ] || fail 'uninstall 没删 conf'
+[ ! -e "$TMP/pkg/bin/aosc-exec-guard" ] || fail 'uninstall 没删二进制'
+
 step 'stubs: fake binfmt dir + stub qemu + stub zenity'
 mkdir -p "$TMP/bin" "$TMP/binfmt"
 cat > "$TMP/bin/qemu-aarch64" <<'STUB'
