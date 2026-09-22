@@ -23,8 +23,8 @@ case "$(uname -m)" in
   aarch64|arm64) echo '本机是 aarch64：跳过（条目会劫持解释器自身）' >&2; exit 1;;
 esac
 
-CONF_SRC=$PWD/data/binfmt.d/zz-aosc-exec-guard-aarch64.conf
-CONF_DST=/usr/lib/binfmt.d/zz-aosc-exec-guard-aarch64.conf
+CONF_SRC=$PWD/data/binfmt.d/zz-aosc-exec-guard.conf
+CONF_DST=/usr/lib/binfmt.d/zz-aosc-exec-guard.conf
 GUARD=$PWD/target/release/aosc-exec-guard
 [ -x "$GUARD" ] || { echo "找不到 $GUARD；请先运行 scripts/test.sh" >&2; exit 1; }
 BM=/proc/sys/fs/binfmt_misc
@@ -75,6 +75,14 @@ sed "s|/usr/bin/aosc-exec-guard|$GUARD|" "$CONF_SRC" > "$CONF_DST"
 chmod 644 "$CONF_DST"
 systemctl restart systemd-binfmt.service
 show_entry aosc-exec-guard-aarch64
+# 一个 conf 文件里的多条规则（systemd-binfmt 逐行注册）都应该生效
+for arch in aarch64 arm loongarch64 riscv64 alpha; do
+  if [ ! -e "$BM/aosc-exec-guard-$arch" ]; then
+    echo "FAIL: 条目 aosc-exec-guard-$arch 未注册" >&2
+    exit 1
+  fi
+done
+printf '  （一个 conf 文件里的多条规则全部注册：aarch64/arm/loongarch64/riscv64/alpha …）\n'
 
 step '运行时优先级：服务刚注册的 guard vs 开机时的 qemu'
 probe

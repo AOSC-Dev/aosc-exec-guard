@@ -89,17 +89,23 @@ fn native_machine() -> Option<u16> {
 
 fn machine_name(machine: u16) -> Option<&'static str> {
     Some(match machine {
+        0x02 => "SPARC",
         0x03 => "i386（x86）",
+        0x04 => "m68k",
         0x08 => "MIPS",
+        0x12 => "SPARC32PLUS（SPARC V8+）",
         0x14 => "PowerPC",
         0x15 => "PowerPC 64",
         0x16 => "s390x",
         0x28 => "ARM",
         0x2a => "SuperH",
+        0x2b => "SPARC64（SPARC v9）",
         0x3e => "x86_64",
         0xb7 => "aarch64（ARM64）",
         0xf3 => "RISC-V",
         0x102 => "LoongArch",
+        0x9026 => "Alpha",
+        0xbaab => "MicroBlaze",
         _ => return None,
     })
 }
@@ -360,32 +366,36 @@ fn binfmt_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/proc/sys/fs/binfmt_misc"))
 }
 
-/// qemu-user 的 binfmt 条目名（与 qemu-binfmt-conf.sh 一致）。
+/// qemu-user 的 binfmt 条目名（与 data/binfmt.d/ 里的规则一一对应，测试会校验）。
 fn qemu_entry_names(info: &ElfInfo) -> &'static [&'static str] {
     use ElfClass::{Bits32, Bits64};
     use Endian::{Big, Little};
     match (info.machine, info.class, info.endian) {
+        (0x02, Bits32, Big) => &["qemu-sparc"],
         (0x03, _, _) => &["qemu-i386"],
-        (0x3e, _, _) => &["qemu-x86_64"],
+        (0x04, Bits32, Big) => &["qemu-m68k"],
+        (0x08, Bits32, Little) => &["qemu-mipsel"],
+        (0x08, Bits32, Big) => &["qemu-mips"],
+        (0x08, Bits64, Little) => &["qemu-mips64el"],
+        (0x08, Bits64, Big) => &["qemu-mips64"],
+        (0x12, Bits32, Big) => &["qemu-sparc32plus"],
+        (0x14, _, _) => &["qemu-ppc"],
+        (0x15, _, Little) => &["qemu-ppc64le"],
+        (0x15, _, Big) => &["qemu-ppc64"],
+        (0x16, _, _) => &["qemu-s390x"],
         (0x28, _, Little) => &["qemu-arm"],
         (0x28, _, Big) => &["qemu-armeb"],
+        (0x2a, _, Little) => &["qemu-sh4"],
+        (0x2a, _, Big) => &["qemu-sh4eb"],
+        (0x2b, Bits64, Big) => &["qemu-sparc64"],
+        (0x3e, _, _) => &["qemu-x86_64"],
         (0xb7, _, Little) => &["qemu-aarch64"],
         (0xb7, _, Big) => &["qemu-aarch64_be"],
         (0xf3, Bits32, Little) => &["qemu-riscv32"],
         (0xf3, Bits64, Little) => &["qemu-riscv64"],
         (0x102, _, Little) => &["qemu-loongarch64"],
-        (0x08, Bits32, Little) => &["qemu-mipsel"],
-        (0x08, Bits32, Big) => &["qemu-mips"],
-        (0x08, Bits64, Little) => &["qemu-mips64el"],
-        (0x08, Bits64, Big) => &["qemu-mips64"],
-        (0x14, _, _) => &["qemu-ppc"],
-        (0x15, _, Little) => &["qemu-ppc64le"],
-        (0x15, _, Big) => &["qemu-ppc64"],
-        (0x16, _, _) => &["qemu-s390x"],
-        (0x2a, _, Little) => &["qemu-sh4"],
-        (0x2a, _, Big) => &["qemu-sh4eb"],
-        (0x02, _, _) => &["qemu-sparc"],
-        (0x2b, _, _) => &["qemu-sparc64"],
+        (0x9026, Bits64, Little) => &["qemu-alpha"],
+        (0xbaab, Bits32, Big) => &["qemu-microblaze"],
         _ => &[],
     }
 }
@@ -833,6 +843,79 @@ mod tests {
         assert_eq!(parse_qemu_mode(" never "), Some(QemuMode::Never));
         assert_eq!(parse_qemu_mode("ask"), Some(QemuMode::Ask));
         assert_eq!(parse_qemu_mode("sometimes"), None);
+    }
+
+    /// 把 conf 里的 `\x7fELF…` 转回字节。
+    fn parse_magic_bytes(field: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut chars = field.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' && chars.peek() == Some(&'x') {
+                chars.next();
+                let hex: String = chars.by_ref().take(2).collect();
+                bytes.push(u8::from_str_radix(&hex, 16).unwrap());
+            } else {
+                bytes.push(ch as u8);
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn every_conf_rule_matches_the_arch_table() {
+        // 规则是逐字节从 AOSC 的 qemu-user 包抄来的，必须和 qemu_entry_names()
+        // 一一对应，否则“发现可用的仿真器”这条路径会失效。
+        let conf = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/data/binfmt.d/zz-aosc-exec-guard.conf"
+        );
+        let text = std::fs::read_to_string(conf).expect("读 data/binfmt.d/zz-aosc-exec-guard.conf");
+
+        let mut rules = 0;
+        for line in text.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // :条目名:M::magic:mask:解释器:flags
+            let fields: Vec<&str> = line.split(':').collect();
+            let name = fields[1];
+            let arch = name.strip_prefix("aosc-exec-guard-").expect("条目名");
+            assert_eq!(fields[6], "/usr/bin/aosc-exec-guard", "{name} 的解释器");
+            assert!(fields[7].contains('F'), "{name} 应带 F 标志");
+
+            let magic = parse_magic_bytes(fields[4]);
+            assert_eq!(&magic[0..4], b"\x7fELF", "{name} 的 magic");
+            let (endian, machine) = match magic[EI_DATA] {
+                ELFDATA2MSB => (
+                    Endian::Big,
+                    u16::from_be_bytes([magic[E_MACHINE_OFF], magic[E_MACHINE_OFF + 1]]),
+                ),
+                _ => (
+                    Endian::Little,
+                    u16::from_le_bytes([magic[E_MACHINE_OFF], magic[E_MACHINE_OFF + 1]]),
+                ),
+            };
+            let info = ElfInfo {
+                class: match magic[EI_CLASS] {
+                    ELFCLASS32 => ElfClass::Bits32,
+                    _ => ElfClass::Bits64,
+                },
+                endian,
+                machine,
+            };
+
+            let expected = format!("qemu-{arch}");
+            let names = qemu_entry_names(&info);
+            assert!(
+                names.contains(&expected.as_str()),
+                "{name}（{info:?}）应映射到 {expected}，实际是 {names:?}"
+            );
+            rules += 1;
+        }
+        assert!(
+            rules >= 20,
+            "只解析到 {rules} 条规则，conf 是不是被截断了？"
+        );
     }
 
     #[test]

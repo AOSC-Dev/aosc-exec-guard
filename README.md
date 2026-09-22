@@ -10,24 +10,25 @@
 
 - **`binfmt_misc` 条目在每次 exec 时都会被先行匹配**（先于 `binfmt_elf`）。命中后文件直接交给条目的解释器，不再尝试原生加载。
 - 因此，条目必须**按目标架构精确匹配**（和 qemu 的 conf 一个套路：用 magic/mask 钉死 ELF 位宽、字节序、`e_machine`、`ET_EXEC|ET_DYN`）；**绝不能**用"匹配所有 ELF"的万能条目——它会把解释器自身（同样是 ELF）也劫持进去，内核的解释器递归到达上限后返回 `ELOOP`，导致全系统无法再启动新程序（见"踩坑记录"）。条目也绝不能匹配**本机架构**，因为 guard 自己就是本机架构。
-- 所以本仓库是"一个架构一个条目"：
+- 所以本仓库是"一个架构一条规则"，但装在**一个** conf 文件里（`man binfmt.d`：一个文件就是"一串规则"，systemd-binfmt 逐行注册，注释行 `#`/`;` 忽略——实测有效）：
 
   ```
-  data/binfmt.d/zz-aosc-exec-guard-aarch64.conf     # aarch64（ARM64）
-  data/binfmt.d/zz-aosc-exec-guard-riscv64.conf     # RISC-V 64
-  data/binfmt.d/zz-aosc-exec-guard-loongarch64.conf # LoongArch 64
-  data/binfmt.d/zz-aosc-exec-guard-arm.conf         # ARM（32 位）
+  data/binfmt.d/zz-aosc-exec-guard.conf   # 20 条规则：aarch64/arm/armeb/riscv64/loongarch64/
+                                          #   mips{,64el,el}/ppc{,64,64le}/s390x/sh4{,eb}/
+                                          #   sparc{,32plus,64}/alpha/m68k/microblaze
   ```
+
+  规则里的 magic/mask **逐字节抄自 AOSC OS 的 qemu-user 包**（`/usr/lib/binfmt.d/qemu-*.conf`），只把条目名和解释器换成本程序——以后要覆盖新架构，从 qemu 的 conf 里再抄一行即可。
 
   `zz-` 前缀不是随手起的：systemd-binfmt 按文件名排序应用 conf、后应用者优先（实测），`zz-` 让 guard 排在 `qemu-*` 之后 → **guard 先接住外来架构的程序**，再由它决定要不要交给模拟器（见下）。
 
-  例如 aarch64 条目：
+  例如其中 aarch64 那条：
 
   ```
   :aosc-exec-guard-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/aosc-exec-guard:F
   ```
 
-  （打包时注意：像 qemu 那样过滤掉本机架构，不要把对应本机的 conf 装上系统。）
+  （打包/安装时注意：**删掉与目标机器架构相同的那些规则**——如 aarch64 机器上删掉 `-aarch64:` 那一行。装上本机架构的规则会让条目劫持 guard 自身 → `ELOOP` → 全系统起不了新程序；qemu 的包本身也是按架构过滤后才装进系统的。本文件是在 x86_64 机器上抄的，里面没有 x86_64/i386 规则，本机直接装即可。）
 - `aosc-exec-guard` 的工作：
   - 读 ELF 头（只读前 20 字节），区分三种情况：外来架构 / 本机架构（本不该被条目命中，防呆）/ 根本不是 ELF；
   - 输出解释到 stderr；如果是从图形会话启动（有 `DISPLAY`/`WAYLAND_DISPLAY`，且 stdout/stderr 都不是终端，也不是 systemd 服务），再调 `zenity`/`kdialog` 弹框；
@@ -44,7 +45,7 @@
 
 ```
 src/main.rs                  guard 本体（Rust；只用 clap 做命令行解析）
-data/binfmt.d/*.conf         /usr/lib/binfmt.d/ 用的注册项（一架构一个）
+data/binfmt.d/zz-aosc-exec-guard.conf  /usr/lib/binfmt.d/ 用的注册项（一个文件，20 条按架构的规则，抄自 qemu）
 scripts/test.sh              本地测试（无 root）：单测 + 直测 + stub zenity 弹框 / stub qemu 的询问转发分支
 scripts/get-test-binary.sh   下载真实的 aarch64 静态二进制（Alpine busybox-static）
 scripts/kernel-test.sh       内核端到端测试（需要 root，自动清理/恢复）
@@ -96,7 +97,7 @@ $ rm -f ~/.config/aosc-exec-guard.conf
 
 ## 已知问题 / 待办
 
-- **与模拟器条目的优先级**：已实测，见"实测结论"——systemd-binfmt 按文件名排序应用 conf、后应用者优先；`zz-aosc-exec-guard-*` 排在 `qemu-*` 之后，所以**干净启动时 guard 先匹配**，由它询问/转发给模拟器（`AOSC_EXEC_GUARD_QEMU=never` 可让它不插手）。不想让 guard 介入的发行版/用户，把 conf 删除或改回 `aosc-exec-guard-*` 即可，qemu 条目会照旧直接接管。
+- **与模拟器条目的优先级**：已实测，见"实测结论"——systemd-binfmt 按文件名排序应用 conf、后应用者优先；`zz-aosc-exec-guard.conf` 排在 `qemu-*` 之后，所以**干净启动时 guard 先匹配**，由它询问/转发给模拟器（`AOSC_EXEC_GUARD_QEMU=never` 可让它不插手）。不想让 guard 介入的发行版/用户，把 conf 删掉或改名排到 qemu 前面即可，qemu 条目会照旧直接接管。
 - **ENOENT 盲区**：缺解释器的情况（如 32 位程序找不到 `/lib/ld-linux.so.2`、shebang 解释器不存在）报的是 `ENOENT` 而不是 `ENOEXEC`，`binfmt_misc` 拦不到，需要另行设计。
 - 文案暂未接 i18n（先用中文）；生产构建建议静态链接。
 
@@ -105,10 +106,11 @@ $ rm -f ~/.config/aosc-exec-guard.conf
 1. **匹配时机**：`binfmt_misc` 条目在每次 exec 时先行匹配（先于 `binfmt_elf`）；命中即接管，不再尝试原生加载。
 2. **优先级**：条目按注册顺序迭代，**后注册者优先**；运行时手工注册（`kernel-test.sh` 的做法）会盖过开机时就存在的条目。
 3. **systemd-binfmt 的顺序**：按文件名排序应用 conf 并逐个（重）注册；冲突时**最后应用的那个胜出**。
-4. **于是**：`zz-aosc-exec-guard-*.conf`（z）排在 `qemu-*.conf`（q）之后 → 干净启动时 guard 后应用、优先级更高 → **guard 先接住外来架构的程序**，再按 `--qemu` / `AOSC_EXEC_GUARD_QEMU` / 用户配置决定是转发给模拟器还是只解释（`kernel-test.sh`、`systemd-install-test.sh` 都会验证这一步）。
+4. **于是**：`zz-aosc-exec-guard.conf`（z）排在 `qemu-*.conf`（q）之后 → 干净启动时 guard 后应用、优先级更高 → **guard 先接住外来架构的程序**，再按 `--qemu` / `AOSC_EXEC_GUARD_QEMU` / 用户配置决定是转发给模拟器还是只解释（`kernel-test.sh`、`systemd-install-test.sh` 都会验证这一步）。
 5. **清理**：`systemd-binfmt` 重启会注销"不在配置里"的条目；也可手动 `echo -1 > /proc/sys/fs/binfmt_misc/<条目名>`。
 6. **打包注意**：conf 带 `F` 标志 → 注册时解释器文件必须已存在（试过不存在的路径，服务直接报 `No such file or directory` 注册失败）；二进制和 conf 在同一包里安装没问题。
 7. **端到端行为**：伪造和真实的 aarch64 ELF 都被 guard 接管（中文解释 + 退出码 126）；禁用/恢复 qemu、条目清理均验证通过。
+8. **一个 conf 文件可以放多条规则**：`man binfmt.d` 原文是 "Each file contains a list of binfmt_misc kernel binary format rules"，systemd-binfmt 逐行注册、`#`/`;` 开头的注释行忽略（实测：一个文件里两行规则同时注册成功，删掉文件重启后对应条目消失）。
 
 ## 踩坑记录（2026-09-22，实测）
 
