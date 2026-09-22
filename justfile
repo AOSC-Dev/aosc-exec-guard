@@ -326,6 +326,23 @@ test: build
     [ "$code" -eq 126 ] || fail "--qemu=never should override the saved answer, got $code"
     rm -f "$PWD/$TMP/home/.config/aosc-exec-guard.conf"
 
+    step 'qemu: /etc 里的系统默认（用户配置盖过它）'
+    printf '# 系统默认（打包方/管理员放的）\nqemu = never\n' > "$TMP/etc-guard.conf"
+    printf 'qemu = always\n' > "$PWD/$TMP/home/.config/aosc-exec-guard.conf"
+    set +e
+    out=$(guard_env "$PWD/$TMP/binfmt" AOSC_EXEC_GUARD_SYSTEM_CONFIG="$PWD/$TMP/etc-guard.conf" "$GUARD" "$TMP/aarch64.elf" 2>&1)
+    code=$?
+    set -e
+    printf 'user=always + system=never exit=%s\n' "$code"
+    [ "$code" -eq 42 ] || fail "用户配置应盖过 /etc 的系统默认，got $code"
+    rm -f "$PWD/$TMP/home/.config/aosc-exec-guard.conf"
+    set +e
+    out=$(guard_env "$PWD/$TMP/binfmt" AOSC_EXEC_GUARD_SYSTEM_CONFIG="$PWD/$TMP/etc-guard.conf" "$GUARD" "$TMP/aarch64.elf" 2>&1)
+    code=$?
+    set -e
+    printf 'user=- + system=never exit=%s\n' "$code"
+    [ "$code" -eq 126 ] || fail "/etc 的系统默认应生效（never → 只解释），got $code"
+
     step 'qemu: chroot 里让位（忽略保存的选择、不询问）'
     # 真 chroot 的用例在 kernel-test；这里用 AOSC_EXEC_GUARD_FORCE_CHROOT 让 guard
     # 以为自己在 chroot 里。

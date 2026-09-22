@@ -39,8 +39,8 @@
   - `ask`（默认）：图形会话弹询问框（复选框"不再询问"），终端里给一个上下键菜单（运行一次 / 不运行 / 总是运行，回车确认、`q` 退出）；两种界面都拿不到时（服务、无终端、无对话框）保持老行为——直接交给模拟器；**chroot / 容器里不问，见下文“让位”**；
   - `always`：直接换成模拟器运行，argv 布局与内核调用模拟器时一致（`<解释器> <程序路径> <原参数…>`）；
   - `never`：只解释，不运行。
-  勾了"不再询问"（或终端菜单里选了"总是运行"）会把选择写进 `~/.config/aosc-exec-guard.conf`（`qemu = always|never`）；想固定成"从不运行"就手写 `qemu = never`（或 `--qemu=never` / `AOSC_EXEC_GUARD_QEMU=never`），菜单里不再提供这个选项。删掉该文件即可恢复询问。
-- 开关：`--no-dialog` / `--debug` / `--qemu=<ask|always|never>`（分别等同 `AOSC_EXEC_GUARD_NO_DIALOG=1` / `AOSC_EXEC_GUARD_DEBUG=1` / `AOSC_EXEC_GUARD_QEMU=…`）。内核调用时命令行只能是"程序路径 + 原程序参数"，没法给 guard 传选项，所以环境变量是内核路径下唯一可用的开关；命令行选项只服务于手动运行。`--qemu` 的优先级：命令行 > 环境变量 > 用户配置。手动再记一个：`--handover[=on|off]`（需要 root，把位置让给内核的 qemu 条目，见下文；脚本里加 `--yes`）。
+  勾了"不再询问"（或终端菜单里选了"总是运行"）会把选择写进 `~/.config/aosc-exec-guard.conf`（`qemu = always|never`）；想固定成"从不运行"就手写 `qemu = never`（或 `--qemu=never` / `AOSC_EXEC_GUARD_QEMU=never`），菜单里不再提供这个选项。系统级默认可以放 `/etc/aosc-exec-guard.conf`（打包方/管理员用，用户配置盖过它）。删掉配置文件即可恢复询问。
+- 开关：`--no-dialog` / `--debug` / `--qemu=<ask|always|never>`（分别等同 `AOSC_EXEC_GUARD_NO_DIALOG=1` / `AOSC_EXEC_GUARD_DEBUG=1` / `AOSC_EXEC_GUARD_QEMU=…`）。内核调用时命令行只能是"程序路径 + 原程序参数"，没法给 guard 传选项，所以环境变量是内核路径下唯一可用的开关；命令行选项只服务于手动运行。`--qemu` 的优先级：命令行 > 环境变量 > 用户配置（`~/.config/aosc-exec-guard.conf`）> 系统默认（`/etc/aosc-exec-guard.conf`）。手动再记一个：`--handover[=on|off]`（需要 root，把位置让给内核的 qemu 条目，见下文；脚本里加 `--yes`）。
 - 命令行解析用 clap：`aosc-exec-guard [选项] <程序路径> [参数…]`——路径之后的参数一律原样保留，`--debug`、`--help` 之类不会被 guard 抢去解析（它们本来就属于原程序）。
 
 ## 目录
@@ -52,7 +52,7 @@ src/qemu.rs                  模拟器（binfmt_misc 注册表）的发现与转
 src/handover.rs              让位给内核的 qemu 条目（--handover）
 src/prompt.rs                询问：zenity/kdialog 弹框、dialoguer 终端菜单、出错弹框
 src/platform.rs              环境判定：终端 / 图形 / systemd 服务 / chroot
-src/config.rs                设置：--qemu、AOSC_EXEC_GUARD_QEMU、用户配置的优先级与读写
+src/config.rs                设置：--qemu、AOSC_EXEC_GUARD_QEMU、/etc 与用户配置的优先级与读写
 justfile                     开发/测试/安装入口（just / just test / sudo just install …）
 rust-toolchain.toml         rustup：stable + 各主架构的 musl 标准库（静态构建用）
 scripts/install.sh           安装/卸载脚本（just install 就是调它；打包可直接调，不必依赖 just）
@@ -109,7 +109,7 @@ $ sudo sh -c 'echo -1 > /proc/sys/fs/binfmt_misc/aosc-exec-guard-aarch64'
 恢复"每次都问"（清掉"不再询问"记住的选择）：
 
 ```console
-$ rm -f ~/.config/aosc-exec-guard.conf
+$ rm -f ~/.config/aosc-exec-guard.conf   # 用户选择；系统默认在 /etc/aosc-exec-guard.conf
 ```
 
 ## chroot / 容器里
@@ -123,7 +123,7 @@ binfmt_misc 条目是**宿主**注册的（严格说，是**用户命名空间**
 
 guard 认得自己在不在 chroot（比较 `/` 与 `/proc/1/root`）；**看不到 binfmt_misc 注册表时也一并按“让位”处理**（没挂 /proc 的 chroot、容器里就是这样）：那时既没法可靠判断自己在哪，也没法知道内核会怎么处理这个文件。这些环境里它的行为刻意和宿主机不同——**宿主机上的选择、以及“要不要问”本身，都不该带进来**（这是**逐次运行**时发生的让位；要一劳永逸地把 guard 从执行路径里拿掉，见下面「让位给内核的 qemu 条目」）：
 
-- **不问、不带宿主机配置**：忽略 `~/.config/aosc-exec-guard.conf` 里“不再询问”记住的选择（即使那个文件看得见），也不弹询问框（终端里也不会出菜单）；默认直接交给模拟器，让环境里的行为等于**没装 guard 时的行为**。
+- **不问、不带宿主机配置**：忽略 `~/.config/aosc-exec-guard.conf` 与 `/etc/aosc-exec-guard.conf` 里“不再询问”记住的选择（即使那些文件看得见），也不弹询问框（终端里也不会出菜单）；默认直接交给模拟器，让环境里的行为等于**没装 guard 时的行为**。
 - **找不到就解释**（并提示：guard 只认注册表，宿主机条目要挂上 /proc 才看得见）。
 - 命令行 `--qemu=never|always|ask` 和 `AOSC_EXEC_GUARD_QEMU` 仍然算数：是你显式下的指令，不会被忽略（想在没挂 /proc 的 chroot 里手动要个菜单，就显式写 `--qemu=ask`）。
 
