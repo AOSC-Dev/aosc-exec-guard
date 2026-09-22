@@ -28,7 +28,9 @@ build:
       *-musl) triple=$host ;;
       *) triple=${host%-gnu}-musl ;;   # x86_64-unknown-linux-gnu → …-linux-musl
     esac
-    if rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
+    # 有 musl 的 std 就用 musl（不依赖 rustup：发行版自带 rust-std-musl 也算）
+    libdir=$(rustc --print target-libdir --target "$triple" 2>/dev/null || true)
+    if [ -n "$libdir" ] && [ -d "$libdir" ]; then
       cargo build --release --target "$triple"
       bin="target/$triple/release/aosc-exec-guard"
       echo "（musl 静态构建：$triple）"
