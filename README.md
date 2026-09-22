@@ -30,7 +30,7 @@
   :aosc-exec-guard-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/aosc-exec-guard:F
   ```
 
-  **装不到本机架构的规则上去**（会劫持解释器自身 → `ELOOP` → 全系统起不了新程序），但不用手工去删：`just install` 按 qemu 的 `qemu-binfmt-conf.sh` **同一套“家族”表**过滤（amd64 上删 i386+x86_64、aarch64 上删 arm+aarch64、mips64 上删 mips 一族…），装到 `/usr` 后还会拿 `/usr/bin/true` 做 exec 冒烟测试，万一过滤漏了它会用内建命令立刻撤销并报错。所以**一份 conf 就够，不需要为每个目标架构各存一份**；打成包时用 `just install <目录>`（交叉打包再加一个目标架构参数，见 `just --list`）。
+  **装不到本机架构的规则上去**（会劫持解释器自身 → `ELOOP` → 全系统起不了新程序），但不用手工去删：`just install`（底层是 `scripts/install.sh`）按 qemu 的 `qemu-binfmt-conf.sh` **同一套“家族”表**过滤（amd64 上删 i386+x86_64、aarch64 上删 arm+aarch64、mips64 上删 mips 一族…），装到 `/usr` 后还会拿 `/usr/bin/true` 做 exec 冒烟测试，万一过滤漏了它会用内建命令立刻撤销并报错。所以**一份 conf 就够，不需要为每个目标架构各存一份**；打成包时用 `just install <目录>` 或直接 `scripts/install.sh --prefix <目录>`（交叉打包再加目标架构参数，见 `just --list` / `scripts/install.sh --help`）。
 - `aosc-exec-guard` 的工作：
   - 读 ELF 头（只读前 20 字节），区分三种情况：外来架构 / 本机架构（本不该被条目命中，防呆）/ 根本不是 ELF；
   - 输出解释到 stderr；如果是从图形会话启动（有 `DISPLAY`/`WAYLAND_DISPLAY`，且 stdout/stderr 都不是终端，也不是 systemd 服务），再调 `zenity`/`kdialog` 弹框；
@@ -48,7 +48,8 @@
 ```
 src/main.rs                  guard 本体（Rust；只用 clap 做命令行解析）
 justfile                     开发/测试/安装入口（just / just test / sudo just install …）
-data/binfmt.d/zz-aosc-exec-guard.conf.in  规则模板（全集，22 条，抄自 qemu）；安装时由 just install 过滤成 /usr/lib/binfmt.d/zz-aosc-exec-guard.conf
+scripts/install.sh           安装/卸载脚本（just install 就是调它；打包可直接调，不必依赖 just）
+data/binfmt.d/zz-aosc-exec-guard.conf.in  规则模板（全集，22 条，抄自 qemu）；安装时由安装脚本过滤成 /usr/lib/binfmt.d/zz-aosc-exec-guard.conf
 ```
 
 ## 使用
@@ -69,6 +70,8 @@ $ sudo just uninstall
 # 打包/暂存目录（不碰内核）
 $ just install /tmp/pkg                  # 目标就是本机架构
 $ just install /tmp/pkg aarch64          # 交叉打包指定目标架构
+# 打包脚本也可以直接调安装脚本（不依赖 just）：
+$ scripts/install.sh --prefix /tmp/pkg --host-arch aarch64
 ```
 
 可选的真实 aarch64 二进制：

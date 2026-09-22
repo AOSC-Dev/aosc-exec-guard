@@ -1,6 +1,6 @@
 # aosc-exec-guard：外来架构 ELF 的 binfmt_misc 规则**模板**（.conf.in）。
 #
-# 这里是规则全集，给 `just install` 用：安装时会按本机家族删掉相应规则，生成
+# 这里是规则全集，给安装脚本用（`just install` / `scripts/install.sh`）：安装时会按本机家族删掉相应规则，生成
 # /usr/lib/binfmt.d/zz-aosc-exec-guard.conf（systemd-binfmt 只认 .conf，本来也不会读
 # 这个 .in；但别手工把它改名装上去——里面带着本机架构的规则）。
 #
@@ -16,7 +16,7 @@
 # 到 ELOOP，全系统都启动不了新程序。
 #
 # 所以安装/打包时必须去掉本机家族的规则（amd64 上删 i386+x86_64、aarch64 上删 arm+
-# aarch64…）：用 `just install`，它按 qemu 的 qemu-binfmt-conf.sh 同一套家族表过滤，
+# aarch64…）：用安装脚本（`just install`，或直接 `scripts/install.sh`），它按 qemu 的 qemu-binfmt-conf.sh 同一套家族表过滤，
 # 并会在装完后做本机 exec 冒烟测试。
 :aosc-exec-guard-i386:M::\x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x03\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/aosc-exec-guard:F
 :aosc-exec-guard-x86_64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/aosc-exec-guard:F
