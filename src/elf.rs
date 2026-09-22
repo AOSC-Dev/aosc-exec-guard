@@ -8,8 +8,8 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use crate::platform::in_chroot;
-use crate::qemu::QemuEntry;
+use crate::platform::{in_chroot, in_container};
+use crate::qemu::{QemuEntry, registry_visible};
 
 pub const EI_CLASS: usize = 4;
 pub const EI_DATA: usize = 5;
@@ -184,12 +184,17 @@ pub fn build_message(
                     entry.name
                 ),
                 // 宿主机注册的条目在 chroot 里照样会命中；但 guard 找模拟器时
-                // 必须在 rootfs 里看到那个文件（F 只让内核重用注册时打开的
-                // 解释器文件，guard 转发时 exec 的仍然是路径）。
-                None if in_chroot() => "提示：看起来是在 chroot 里：这里看不到可用的模拟器条目\
-                                        （guard 只认 binfmt_misc 注册表；宿主机的条目要挂上 /proc 才看得见），\
-                                        可以到 chroot 外面运行。"
-                    .to_string(),
+                // 必须在脚下看到那个文件（F 只让内核重用注册时打开的解释器
+                // 文件，guard 转发时 exec 的仍然是路径）。chroot（没挂 /proc，
+                // 认不出来）、容器里都是这样：没有任何可达路径，只能解释。
+                None if in_chroot() || in_container() || !registry_visible() => {
+                    "提示：看起来在 chroot / 容器 里（或者看不到 binfmt_misc 注册表）：\
+                     这里找不到能用的模拟器条目，guard 转不了。\
+                     如果宿主机装了 qemu-user：到外面（宿主机）上运行 `sudo aosc-exec-guard --handover`，\
+                     让 guard 退出、由内核的 qemu 条目接管——qemu 条目用 F 直接打开宿主机的解释器，\
+                     chroot / 容器 里不需要放 qemu。"
+                        .to_string()
+                }
                 None => "提示：可以安装对应架构的模拟器（qemu-user-static、box64 等）后重试，\
                          或改用 AOSC OS 原生版本。"
                     .to_string(),

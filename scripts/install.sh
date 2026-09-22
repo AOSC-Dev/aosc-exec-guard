@@ -193,7 +193,7 @@ if [ "$UNINSTALL" = yes ]; then
   if [ -e "$CONF_DST" ]; then
     cp "$CONF_DST" "$undo_list"
   fi
-  rm -f "$BIN_DST" "$CONF_DST"
+  rm -f "$BIN_DST" "$CONF_DST" "$CONF_DST.disabled"
   if [ "$PREFIX_GIVEN" = no ]; then
     restart_binfmt
     undo_entries "$undo_list"   # 保险：万一服务没把条目注销掉
@@ -220,6 +220,8 @@ fi
 
 install -Dm755 "$BIN_SRC" "$BIN_DST"
 install -Dm644 "$tmp_conf" "$CONF_DST"
+# 装/重装即清除上一轮 --handover 留下的停用标记（重新启用 guard）
+rm -f "$CONF_DST.disabled"
 printf '已写入 %s\n已写入 %s（%s 条规则，已去掉 %s 家族的规则）\n' \
   "$BIN_DST" "$CONF_DST" \
   "$(grep -c '^:' "$CONF_DST")" "$HOST_FAMILY"

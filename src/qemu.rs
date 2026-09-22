@@ -135,6 +135,37 @@ pub fn parse_qemu_entry(name: &str, text: &str) -> Option<QemuEntry> {
     })
 }
 
+/// 注册表里所有 guard 条目名（`aosc-exec-guard-*`）。
+pub fn guard_entries(dir: &Path) -> Vec<String> {
+    entry_names(dir, "aosc-exec-guard-")
+}
+
+/// 注册表里“已启用”的 qemu-* 条目名。不检查解释器文件在不在：带 `F` 的条目
+/// 注册时就把解释器打开了，文件后来没了内核也照样能用（guard 自己转发才需要
+/// 那个文件还在）。
+pub fn enabled_qemu_entries(dir: &Path) -> Vec<String> {
+    entry_names(dir, "qemu-")
+        .into_iter()
+        .filter(|name| {
+            std::fs::read_to_string(dir.join(name))
+                .is_ok_and(|text| text.lines().next() == Some("enabled"))
+        })
+        .collect()
+}
+
+fn entry_names(dir: &Path, prefix: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with(prefix))
+        .collect();
+    names.sort();
+    names
+}
+
 /// 把控制权交给 qemu：按内核的 argv 布局调用解释器。只有启动失败才会返回。
 pub fn run_via_qemu(entry: &QemuEntry, target: &Path, program_args: &[OsString]) -> std::io::Error {
     let mut command = Command::new(&entry.interpreter);

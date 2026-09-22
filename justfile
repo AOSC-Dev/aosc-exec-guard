@@ -375,6 +375,75 @@ test: build
     case "$out" in *'运行（这次）'*) fail '看不到注册表时不该弹询问菜单' ;; esac
     [ "$code" -eq 126 ] || fail "看不到注册表时应解释并退 126，实际 $code"
     case "$out" in *'无法运行'*) ;; *) fail '应该给出解释' ;; esac
+    case "$out" in *'--handover'*) ;; *) fail '解释里应给出 --handover 这条出路' ;; esac
+
+    step 'handover: 宿主上下文之外拒绝'
+    set +e
+    out=$(env AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/no-such-dir" "$GUARD" --handover --yes 2>&1)
+    code=$?
+    set -e
+    printf '%s\nexit=%s\n' "$out" "$code"
+    [ "$code" -eq 1 ] || fail "看不到注册表时应拒绝，实际 $code"
+    case "$out" in *外面*) ;; *) fail '应提示到宿主机（外面）运行' ;; esac
+
+    set +e
+    out=$(guard_env "$PWD/$TMP/binfmt" AOSC_EXEC_GUARD_FORCE_CHROOT=1 "$GUARD" --handover --yes 2>&1)
+    code=$?
+    set -e
+    [ "$code" -eq 1 ] || fail "chroot 里应拒绝，实际 $code"
+    case "$out" in *chroot*外面*) ;; *) fail '应提示 chroot 里做不了、到外面运行' ;; esac
+
+    set +e
+    out=$(guard_env "$PWD/$TMP/binfmt" AOSC_EXEC_GUARD_FORCE_CONTAINER=1 "$GUARD" --handover --yes 2>&1)
+    code=$?
+    set -e
+    [ "$code" -eq 1 ] || fail "容器里应拒绝，实际 $code"
+    case "$out" in *容器*外面*) ;; *) fail '应提示容器里做不了、到外面运行' ;; esac
+
+    step 'handover: 注销条目 + 停用 conf（测试目录走完整流程）'
+    mkdir -p "$TMP/hand/binfmt" "$TMP/hand/conf"
+    printf 'enabled\ninterpreter /bin/true\nflags: F\n' > "$TMP/hand/binfmt/aosc-exec-guard-aarch64"
+    printf 'enabled\ninterpreter %s\nflags: OCF\n' "$PWD/$TMP/bin/qemu-aarch64" > "$TMP/hand/binfmt/qemu-aarch64"
+    printf '# 测试用 conf（让位只改名、不解析内容）\n:aosc-exec-guard-aarch64:M::x:/usr/bin/aosc-exec-guard:F\n' \
+      > "$TMP/hand/conf/zz-aosc-exec-guard.conf"
+    hand_env() { env AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/hand/binfmt" AOSC_EXEC_GUARD_CONF_DIRS="$PWD/$TMP/hand/conf" "$@"; }
+
+    set +e
+    out=$(hand_env "$GUARD" --handover --yes 2>&1)
+    code=$?
+    set -e
+    printf '%s\nexit=%s\n' "$out" "$code"
+    [ "$code" -eq 0 ] || fail "让位应该成功，实际 $code"
+    [ ! -e "$TMP/hand/conf/zz-aosc-exec-guard.conf" ] || fail 'conf 应被改名'
+    [ -e "$TMP/hand/conf/zz-aosc-exec-guard.conf.disabled" ] || fail 'conf 应改名为 .disabled'
+    [ ! -e "$TMP/hand/binfmt/aosc-exec-guard-aarch64" ] || fail 'guard 条目应被注销'
+    [ -e "$TMP/hand/binfmt/qemu-aarch64" ] || fail 'qemu 条目不该被动'
+    case "$out" in *'让位完成'*) ;; *) fail '应报告让位完成' ;; esac
+
+    set +e
+    out=$(hand_env "$GUARD" --handover --yes 2>&1)
+    code=$?
+    set -e
+    [ "$code" -eq 1 ] || fail "已在让位状态时应直接告知，实际 $code"
+    case "$out" in *off*) ;; *) fail '应提示用 --handover=off 恢复' ;; esac
+
+    step 'handover: =off 恢复（测试目录）'
+    set +e
+    out=$(hand_env "$GUARD" --handover=off --yes 2>&1)
+    code=$?
+    set -e
+    printf '%s\nexit=%s\n' "$out" "$code"
+    [ "$code" -eq 0 ] || fail "恢复应该成功，实际 $code"
+    [ -e "$TMP/hand/conf/zz-aosc-exec-guard.conf" ] || fail 'conf 应恢复原名'
+    [ ! -e "$TMP/hand/conf/zz-aosc-exec-guard.conf.disabled" ] || fail '.disabled 应已消失'
+
+    step 'handover: 没有终端又不加 --yes 时拒绝'
+    set +e
+    out=$(hand_env "$GUARD" --handover 2>&1 </dev/null)
+    code=$?
+    set -e
+    [ "$code" -eq 1 ] || fail "非交互环境应拒绝，实际 $code"
+    case "$out" in *--yes*) ;; *) fail '应提示加 --yes' ;; esac
 
     if [ -x "$TMP/busybox-aarch64" ]; then
       step 'direct: real aarch64 binary (Alpine busybox-static) → explain'
@@ -610,6 +679,46 @@ kernel-test:
     fi
 
     if [ -x "$TMP/busybox-aarch64" ] && [ "$QEMU_WAS_ENABLED" = yes ]; then
+      step 'chroot（没挂 /proc）：guard 转不了，提示 --handover 这条出路'
+      [ -e "$QEMU_ENTRY" ] && echo 1 > "$QEMU_ENTRY"
+      CHR3=$PWD/$TMP/chroot-handover
+      rm -rf "${CHR3:?}"
+      mkdir -p "$CHR3"
+      cp "$TMP/aarch64.elf" "$CHR3/prog"
+      chmod +x "$CHR3/prog"
+      cp "$TMP/busybox-aarch64" "$CHR3/busybox"
+      # 动态 guard 要在空 rootfs 里跑起来还得带上 ld.so/库（原因见上面）；这里只是为了拿它那句解释
+      while read -r left arrow right; do
+        install -Dm644 "$right" "$CHR3$right"
+        case "$left" in /*) install -Dm755 "$right" "$CHR3$left" ;; esac
+      done < <(ldd "$GUARD" | awk '/=> \// {print $1, $2, $3}')
+      set +e
+      out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR3" /prog 2>&1)
+      code=$?
+      set -e
+      printf '%s\nexit=%s\n' "$out" "$code"
+      [ "$code" -eq 126 ] || fail "没挂 /proc 的 chroot 里 guard 只能解释，实际 $code"
+      case "$out" in *--handover*) ;; *) fail '解释里应给出 --handover 这条出路' ;; esac
+
+      step '--handover：guard 退出，内核的 qemu 条目接管（同一个 chroot 立刻能跑）'
+      # 配置目录指到临时目录：不动宿主机的 /usr/lib/binfmt.d（本机也没装过）
+      AOSC_EXEC_GUARD_CONF_DIRS="$PWD/$TMP/confdir" "$GUARD" --handover --yes \
+        || fail '--handover 失败'
+      [ ! -e "$ENTRY" ] || fail '--handover 之后 guard 条目应该消失'
+      set +e
+      out=$(chroot "$CHR3" /busybox uname -m 2>&1)
+      code=$?
+      set -e
+      printf '%s\nexit=%s\n' "$out" "$code"
+      [ "$code" -eq 0 ] || fail "让位后内核的 qemu F 条目应直接把 busybox 跑起来，实际 $code"
+      case "$out" in *aarch64*) ;; *) fail 'busybox 的 uname -m 应输出 aarch64' ;; esac
+      rm -rf "${CHR3:?}"
+
+      # 把手动注册的条目加回来，后面的步骤还要用
+      printf '%s\n' "$line" > "$BM/register"
+    fi
+
+    if [ -x "$TMP/busybox-aarch64" ] && [ "$QEMU_WAS_ENABLED" = yes ]; then
       step 'guard 转发给 qemu：AOSC_EXEC_GUARD_QEMU=always 时 busybox 真的跑起来'
       # 转发要求 qemu 条目处于启用状态（上一步把它禁用过）
       [ -e "$QEMU_ENTRY" ] && echo 1 > "$QEMU_ENTRY"
@@ -699,7 +808,7 @@ systemd-install-test:
 
     cleanup() {
       set +e
-      rm -f "$CONF_DST"
+      rm -f "$CONF_DST" "$CONF_DST.disabled"
       restart_binfmt
       [ -e "$ENTRY" ] && echo -1 > "$ENTRY"
       set -e
@@ -764,6 +873,32 @@ systemd-install-test:
       echo 'FAIL: 干净启动顺序下应当是 guard 先匹配（conf 名以 zz- 开头）' >&2
       exit 1
     fi
+
+    step '--handover：注销条目、停用 conf（真安装路径）'
+    "$GUARD" --handover --yes
+    if [ -e "$BM/aosc-exec-guard-aarch64" ]; then
+      echo 'FAIL: --handover 之后 guard 条目应该消失' >&2
+      exit 1
+    fi
+    if [ ! -e "$CONF_DST.disabled" ]; then
+      echo 'FAIL: conf 应改名为 .disabled' >&2
+      exit 1
+    fi
+    probe
+    [ "$probe_result" = qemu ] || echo '（注意：让位后本次不是 qemu 先匹配）'
+
+    step '--handover=off：恢复 conf 与条目'
+    "$GUARD" --handover=off --yes
+    if [ ! -e "$CONF_DST" ] || [ -e "$CONF_DST.disabled" ]; then
+      echo 'FAIL: conf 应恢复原名' >&2
+      exit 1
+    fi
+    if [ ! -e "$BM/aosc-exec-guard-aarch64" ]; then
+      echo 'FAIL: --handover=off 后 guard 条目应该回来' >&2
+      exit 1
+    fi
+    probe
+    [ "$probe_result" = guard ] || echo '（注意：恢复后本次不是 guard 先匹配）'
 
     step '清理：移除 conf、重放，并确认 guard 条目消失'
     rm -f "$CONF_DST"

@@ -13,11 +13,12 @@
 //! errors.
 //!
 //! 代码按职责分在几个模块里：`elf`（解析与判定）、`qemu`（模拟器发现与转发）、
-//! `prompt`（询问界面）、`platform`（环境判定）、`config`（设置）；这里只留
-//! 命令行解析和主流程。
+//! `prompt`（询问界面）、`platform`（环境判定）、`config`（设置）、`handover`
+//! （让位给内核的 qemu 条目）；这里只留命令行解析和主流程。
 
 mod config;
 mod elf;
+mod handover;
 mod platform;
 mod prompt;
 mod qemu;
@@ -30,8 +31,9 @@ use clap::Parser;
 
 use crate::config::{QemuMode, resolve_qemu_mode, save_qemu_mode};
 use crate::elf::{Verdict, build_message, classify, native_machine};
+use crate::handover::Action;
 use crate::platform::{
-    DisplayMode, decide_mode, env_switch, gui_available, in_service, in_terminal,
+    DisplayMode, decide_mode, env_switch, gui_available, in_container, in_service, in_terminal,
 };
 use crate::prompt::{ask_run_via_qemu, show_dialog};
 use crate::qemu::{find_qemu_entry, registry_visible, run_via_qemu};
@@ -48,13 +50,13 @@ const EXIT_CANNOT_EXEC: i32 = 126;
 #[command(
     version,
     override_usage = "aosc-exec-guard [选项] <程序路径> [参数…]",
-    after_help = "（通常由内核通过 binfmt_misc 调用，无需手动运行。）"
+    after_help = "（通常由内核通过 binfmt_misc 调用，无需手动运行；`--handover` 例外——要手动以 root 运行。）"
 )]
 struct Cli {
     /// 无法运行的程序路径（其后的参数原属于原程序）
     #[arg(
         value_name = "程序路径",
-        required = true,
+        required_unless_present = "handover",
         trailing_var_arg = true,
         allow_hyphen_values = true
     )]
@@ -71,10 +73,28 @@ struct Cli {
     /// 检测到 qemu-user 仿真器时怎么办（环境变量 AOSC_EXEC_GUARD_QEMU；默认读用户配置）
     #[arg(long, value_enum, value_name = "模式")]
     qemu: Option<QemuMode>,
+
+    /// 让 guard 退出、把外架构程序交给内核的 qemu 条目（--handover=off 恢复）
+    #[arg(
+        long,
+        value_enum,
+        value_name = "动作",
+        num_args = 0..=1,
+        default_missing_value = "on",
+        require_equals = true
+    )]
+    handover: Option<Action>,
+
+    /// 跳过确认询问（非交互环境必须加；只对 --handover 有意义）
+    #[arg(long)]
+    yes: bool,
 }
 
 fn main() {
     let cli = Cli::parse();
+    if let Some(action) = cli.handover {
+        std::process::exit(handover::run(action, cli.yes));
+    }
     let (target, program_args) = cli.argv.split_first().expect("clap 保证至少有一个程序路径");
     let target = Path::new(target);
 
@@ -92,13 +112,14 @@ fn main() {
     let mode = decide_mode(no_dialog);
     if debug {
         eprintln!(
-            "[debug] mode={mode:?} qemu={} qemu_mode={qemu_mode:?} registry={} gui={} tty={} in_service={}",
+            "[debug] mode={mode:?} qemu={} qemu_mode={qemu_mode:?} registry={} container={} gui={} tty={} in_service={}",
             qemu_entry.as_ref().map_or("-", |entry| entry.name.as_str()),
             if registry_visible() {
                 "visible"
             } else {
                 "invisible"
             },
+            in_container(),
             gui_available(),
             in_terminal(),
             in_service(),

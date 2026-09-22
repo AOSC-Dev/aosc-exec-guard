@@ -40,7 +40,7 @@
   - `always`：直接换成模拟器运行，argv 布局与内核调用模拟器时一致（`<解释器> <程序路径> <原参数…>`）；
   - `never`：只解释，不运行。
   勾了"不再询问"（或终端菜单里选了"总是/总是不运行"）会把选择写进 `~/.config/aosc-exec-guard.conf`（`qemu = always|never`），删掉该文件即可恢复询问。
-- 开关：`--no-dialog` / `--debug` / `--qemu=<ask|always|never>`（分别等同 `AOSC_EXEC_GUARD_NO_DIALOG=1` / `AOSC_EXEC_GUARD_DEBUG=1` / `AOSC_EXEC_GUARD_QEMU=…`）。内核调用时命令行只能是"程序路径 + 原程序参数"，没法给 guard 传选项，所以环境变量是内核路径下唯一可用的开关；命令行选项只服务于手动运行。`--qemu` 的优先级：命令行 > 环境变量 > 用户配置。
+- 开关：`--no-dialog` / `--debug` / `--qemu=<ask|always|never>`（分别等同 `AOSC_EXEC_GUARD_NO_DIALOG=1` / `AOSC_EXEC_GUARD_DEBUG=1` / `AOSC_EXEC_GUARD_QEMU=…`）。内核调用时命令行只能是"程序路径 + 原程序参数"，没法给 guard 传选项，所以环境变量是内核路径下唯一可用的开关；命令行选项只服务于手动运行。`--qemu` 的优先级：命令行 > 环境变量 > 用户配置。手动再记一个：`--handover[=on|off]`（需要 root，把位置让给内核的 qemu 条目，见下文；脚本里加 `--yes`）。
 - 命令行解析用 clap：`aosc-exec-guard [选项] <程序路径> [参数…]`——路径之后的参数一律原样保留，`--debug`、`--help` 之类不会被 guard 抢去解析（它们本来就属于原程序）。
 
 ## 目录
@@ -49,6 +49,7 @@
 src/main.rs                  CLI 解析（clap）+ 主流程
 src/elf.rs                   ELF 解析、“能不能在本机跑”的判定与解释文案
 src/qemu.rs                  模拟器（binfmt_misc 注册表）的发现与转发
+src/handover.rs              让位给内核的 qemu 条目（--handover）
 src/prompt.rs                询问：zenity/kdialog 弹框、dialoguer 终端菜单、出错弹框
 src/platform.rs              环境判定：终端 / 图形 / systemd 服务 / chroot
 src/config.rs                设置：--qemu、AOSC_EXEC_GUARD_QEMU、用户配置的优先级与读写
@@ -118,7 +119,7 @@ binfmt_misc 条目是**宿主**注册的（严格说，是**用户命名空间**
 
 ### guard 在 chroot 里“让位”（默认行为）
 
-guard 认得自己在不在 chroot（比较 `/` 与 `/proc/1/root`）；**看不到 binfmt_misc 注册表时也一并按“让位”处理**（没挂 /proc 的 chroot、容器里就是这样）：那时既没法可靠判断自己在哪，也没法知道内核会怎么处理这个文件。这些环境里它的行为刻意和宿主机不同——**宿主机上的选择、以及“要不要问”本身，都不该带进来**：
+guard 认得自己在不在 chroot（比较 `/` 与 `/proc/1/root`）；**看不到 binfmt_misc 注册表时也一并按“让位”处理**（没挂 /proc 的 chroot、容器里就是这样）：那时既没法可靠判断自己在哪，也没法知道内核会怎么处理这个文件。这些环境里它的行为刻意和宿主机不同——**宿主机上的选择、以及“要不要问”本身，都不该带进来**（这是**逐次运行**时发生的让位；要一劳永逸地把 guard 从执行路径里拿掉，见下面「让位给内核的 qemu 条目」）：
 
 - **不问、不带宿主机配置**：忽略 `~/.config/aosc-exec-guard.conf` 里“不再询问”记住的选择（即使那个文件看得见），也不弹询问框（终端里也不会出菜单）；默认直接交给模拟器，让环境里的行为等于**没装 guard 时的行为**。
 - **找不到就解释**（并提示：guard 只认注册表，宿主机条目要挂上 /proc 才看得见）。
@@ -131,13 +132,39 @@ guard 认得自己在不在 chroot（比较 `/` 与 `/proc/1/root`）；**看不
 
 两边注册表都说没有，就直接解释退出（不会去看 `/usr/bin/qemu-*` 存不存在）。
 
-于是 chroot 里的体验：rootfs 自己挂了注册表、或者 /proc 在（能借到宿主机条目）→ 外架构程序照常跑；否则 guard 解释原因。
+于是 chroot 里的体验：rootfs 自己挂了注册表、或者 /proc 在（能借到宿主机条目）→ 外架构程序照常跑；否则 guard 解释原因。按“有没有可达的模拟器条目”分一下：
 
-**容器（有自己的 PID namespace，比如 `systemd-nspawn`）另当别论**：`/proc/1/root` 这时指向**容器自己的 init**，借不到宿主机的条目，所以容器里 guard 会直接解释（实测：同一个 busybox，装 guard 前靠内核的宿主机 `F` 条目能跑出 `aarch64`，装 guard 后变成 126；`systemd-nspawn --bind=/proc/sys/fs/binfmt_misc` 也不顶用——它会自己挂新的 /proc）。容器里要能用，得让它**自足**：容器自己挂上 binfmt_misc（systemd 容器默认就会挂）**并且**容器里有对应架构的静态 `qemu-*-static`——实测这时 `registry=visible`、guard 能发现条目并照常询问/转发。
+| 环境 | guard 能转发吗 | 还想让外架构程序跑起来 |
+| --- | --- | --- |
+| 宿主机 | 能（用本地注册表） | —— |
+| chroot（挂了 /proc） | 能（借宿主注册表 `/proc/1/root`） | —— |
+| chroot（没挂 /proc） | 不能 | `--handover`（见下）、把 /proc 挂上、或到外面运行 |
+| 容器（有自己的 PID namespace） | 不能（`/proc/1/root` 是容器自己的 init，借不到） | `--handover`（在宿主机上做），或让容器自足 |
+| 容器（自带注册表 + 自带模拟器） | 能 | —— |
 
-排查这类问题可以用 `--debug`：它会打印 `mode` / `qemu` 条目 / `registry=visible|invisible` / tty 等判定条件。
+**容器（比如 `systemd-nspawn`）为什么特殊**：`/proc/1/root` 指向容器自己的 init，借不到宿主机的条目；而且装 guard 反而会**挡掉内核本来能做的事**——实测同一个 busybox，装 guard 前靠内核的宿主机 `F` 条目能跑出 `aarch64`，装 guard 后变成解释 + 126；`systemd-nspawn --bind=/proc/sys/fs/binfmt_misc` 也不顶用（nspawn 会挂一份新的 /proc 盖住）。容器想“自足”的话：自己挂上 binfmt_misc（systemd 容器默认会挂）**并且**里面有对应架构的静态 `qemu-*-static`——实测这时 `registry=visible`、guard 能发现条目并照常询问/转发。
 
-一个诚实的残留：**既没挂 /proc、自己的注册表里也没有可用条目**的 chroot（比如 `chroot /mnt/xx /bin/sh` 这种临时用法）——这种 chroot 里内核本来会用宿主机那份 `F` 解释器把程序跑起来，但 guard 接住后，两边注册表都看不见/没有条目，**没有任何可达的路径可以转发**，只能解释（退 126）。guard 不会去猜 `/usr/bin/qemu-*`，所以往 rootfs 里放模拟器二进制并不能改变这一点；要么把 /proc 挂上，要么到 chroot 外面运行。
+### 让位给内核的 qemu 条目（`--handover`）
+
+上面那张表里“不能”的格子，根子是同一个：**guard 转发必须看得见模拟器，而内核不需要**——qemu 条目带 `F`，用的是注册时就打开的宿主机解释器，rootfs / 容器里什么都不用放。guard 挡在最前面，就把它变成了“里面得有 qemu 才行”，正是 `F` 想避免的。
+
+于是一旦在宿主机的终端里跑一次：
+
+```console
+$ sudo aosc-exec-guard --handover        # 问一句确认；脚本里可以加 --yes
+```
+
+guard 就**把自己从路径里拿掉**：注销全部 `aosc-exec-guard-*` 条目，并把 `/usr/lib/binfmt.d/zz-aosc-exec-guard.conf` 改名成 `.disabled`（systemd-binfmt 只认 `.conf`，重启也不会再注册）。之后外架构程序由内核的 qemu 条目直接处理，宿主机、chroot、容器 行为统一，上面那些“不能”的格子全部消失。恢复：`sudo aosc-exec-guard --handover=off`（会重启 systemd-binfmt 重新注册），或者重新跑安装脚本。
+
+代价要说清楚：**让位之后 guard 的询问和解释都不会再出现**；之前选过“总是不运行”的用户，那个选择也随之失效（guard 都不在了）。注册表里没有可用的 `qemu-*` 条目时，它会先警告——让位后外架构程序会直接以 `Exec format error` 失败，没人解释也没人模拟。
+
+只能在**宿主机（外面）**上做：chroot 里（注册表属于宿主机、配置文件属于 chroot）、容器里（PID namespace）都会拒绝并提示到外面跑。测试可以用 `AOSC_EXEC_GUARD_CONF_DIRS` 把它指到别的目录（同时会在测试模式里跳过 systemctl）。
+
+排查这类问题可以用 `--debug`：它会打印 `mode` / `qemu` 条目 / `registry=visible|invisible` / `container=true|false` / tty 等判定条件。
+
+一个诚实的残留：**既没挂 /proc、自己的注册表里也没有可用条目**的 chroot（比如 `chroot /mnt/xx /bin/sh` 这种临时用法）——这种 chroot 里内核本来会用宿主机那份 `F` 解释器把程序跑起来，但 guard 接住后，两边注册表都看不见/没有条目，**没有任何可达的路径可以转发**，只能解释（退 126）。guard 不会去猜 `/usr/bin/qemu-*`，所以往 rootfs 里放模拟器二进制并不能改变这一点；要么把 /proc 挂上，要么 `--handover`，要么到 chroot 外面运行。
+
+另外注意“**guard 能跑起来 ≠ 能把程序跑起来**”：静态 guard + `F` 可以让 guard 进程在空 rootfs 里启动并给出解释，但目标程序还是要靠模拟器——空 rootfs 里没有任何可达的模拟器，guard 一样转不了（这正是 `--handover` 存在的理由）。
 
 自己的构建怎么选：
 
@@ -147,11 +174,12 @@ guard 认得自己在不在 chroot（比较 `/` 与 `/proc/1/root`）；**看不
 $ just build-static     # 输出 target/static/aosc-exec-guard（static-pie）
 $ sudo just install     # 装静态版；或手动 install -Dm755 target/static/aosc-exec-guard /usr/bin/aosc-exec-guard
 
-# 路线 2：动态构建 + 连库一起拷进 rootfs（ld.so 和库按 rootfs 的根解析）
+# 不推荐：动态构建往 rootfs 里拷库（会把宿主的 ld.so/库带进目标系统；
+# 测试里为了观察 ENOENT/解释行为才这么做，别在真实系统上用——用静态构建，或 --handover）
 $ ldd target/release/aosc-exec-guard   # 照着把 ld.so 和各库拷到 rootfs 的同一路径
 ```
 
-（还有一种“把同意状态存进内核注册表”的思路：同意时注销 guard 条目、直接注册真解释器。它能彻底让 guard 在 chroot 里不出现，但需要 root 权限动注册表、重启后要由 `/usr/lib/binfmt.d` 之类的文件重放，且“总是不运行”没法用“注销自身”表达；本仓库先走上面的“让位”。）
+（“注销自身”这条路线现在就是上面的 `--handover`：决定在外面做一次，注销条目 + 把 conf 改名，重启后由文件系统状态自然重放。“总是不运行”没法用“注销自身”表达这个问题仍然存在——让位后那个选择就不再生效，已写进上面的代价。）
 
 `just kernel-test` 会真的 chroot 一遍验证整条链路（动态解释器先报 ENOENT、补上库就能解释并认出 chroot；能从 `/proc/1/root` 借到宿主机条目时直接让位转发（真程序 busybox 也跑一遍）；静态解释器 + `F` 时空 rootfs 也能解释）。
 
@@ -161,7 +189,7 @@ $ ldd target/release/aosc-exec-guard   # 照着把 ld.so 和各库拷到 rootfs 
 2. 注册后立刻用 `/usr/bin/true` 冒烟：本机程序必须还能跑，否则立即中止并清理；
 3. 同时保留 `qemu-aarch64` 条目，观察两者谁先匹配（注册顺序语义实测）；
 4. 暂时禁用 `qemu-aarch64`，跑一个伪造的 aarch64 ELF 和（若已下载）真实 busybox，检查解释文本与退出码 126；
-5. chroot 一遍：宿主条目照样命中（`F` 让内核用注册时打开的解释器；动态解释器还差 rootfs 里的 ld.so → ENOENT），补上库后能解释、认出 chroot 并改提示；能从 `/proc/1/root` 借到宿主机条目时直接让位转发（真程序 busybox 也跑一遍）；
+5. chroot 一遍：宿主条目照样命中（`F` 让内核用注册时打开的解释器；动态解释器还差 rootfs 里的 ld.so → ENOENT），补上库后能解释、认出 chroot 并改提示；能从 `/proc/1/root` 借到宿主机条目时直接让位转发（真程序 busybox 也跑一遍）；没挂 /proc 的 chroot 里只能解释、提示 `--handover` 这条出路；让位之后再进同一个 chroot，内核的 qemu 条目直接把 busybox 跑出 `aarch64`；
 6. 把 `AOSC_EXEC_GUARD_QEMU=always` 交给真实的 `binfmt_misc` 调用链，让 busybox 经 guard → qemu 跑起来（`uname -m` 输出 aarch64）；
 7. 恢复 `qemu-aarch64`、注销 guard，确认原来的模拟器行为回来。
 
@@ -169,7 +197,8 @@ $ ldd target/release/aosc-exec-guard   # 照着把 ld.so 和各库拷到 rootfs 
 
 ## 已知问题 / 待办
 
-- **与模拟器条目的优先级**：已实测，见"实测结论"——systemd-binfmt 按文件名排序应用 conf、后应用者优先；`zz-aosc-exec-guard.conf` 排在 `qemu-*` 之后，所以**干净启动时 guard 先匹配**，由它询问/转发给模拟器（`AOSC_EXEC_GUARD_QEMU=never` 可让它不插手）。不想让 guard 介入的发行版/用户，把 conf 删掉或改名排到 qemu 前面即可，qemu 条目会照旧直接接管。
+- **与模拟器条目的优先级**：已实测，见"实测结论"——systemd-binfmt 按文件名排序应用 conf、后应用者优先；`zz-aosc-exec-guard.conf` 排在 `qemu-*` 之后，所以**干净启动时 guard 先匹配**，由它询问/转发给模拟器（`AOSC_EXEC_GUARD_QEMU=never` 可让它不插手）。不想让 guard 介入的发行版/用户，把 conf 删掉或改名排到 qemu 前面即可，qemu 条目会照旧直接接管；`--handover` 就是把这件事做全（注销条目 + 停用 conf）。
+- **`--handover` 的代价**：让位之后 guard 的询问/解释不再出现，“总是不运行”这类用户级选择失效（见「让位给内核的 qemu 条目」）。
 - **ENOENT 盲区**：缺解释器的情况（如 32 位程序找不到 `/lib/ld-linux.so.2`、shebang 解释器不存在）报的是 `ENOENT` 而不是 `ENOEXEC`，`binfmt_misc` 拦不到，需要另行设计。
 - 文案暂未接 i18n（先用中文）；生产构建建议静态链接（`just build-static`）。
 
