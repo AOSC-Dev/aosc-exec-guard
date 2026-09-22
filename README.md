@@ -46,7 +46,12 @@
 ## 目录
 
 ```
-src/main.rs                  guard 本体（Rust；clap 做命令行解析，dialoguer 画终端询问菜单）
+src/main.rs                  CLI 解析（clap）+ 主流程
+src/elf.rs                   ELF 解析、“能不能在本机跑”的判定与解释文案
+src/qemu.rs                  模拟器（binfmt_misc 注册表）的发现与转发
+src/prompt.rs                询问：zenity/kdialog 弹框、dialoguer 终端菜单、出错弹框
+src/platform.rs              环境判定：终端 / 图形 / systemd 服务 / chroot
+src/config.rs                设置：--qemu、AOSC_EXEC_GUARD_QEMU、用户配置的优先级与读写
 justfile                     开发/测试/安装入口（just / just test / sudo just install …）
 scripts/install.sh           安装/卸载脚本（just install 就是调它；打包可直接调，不必依赖 just）
 data/binfmt.d/zz-aosc-exec-guard.conf.in  规则模板（全集，22 条，抄自 qemu）；安装时由安装脚本过滤成 /usr/lib/binfmt.d/zz-aosc-exec-guard.conf
