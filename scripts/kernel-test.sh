@@ -4,6 +4,7 @@
 #   * observes which entry wins when both the guard and qemu-aarch64 match
 #   * runs a fabricated AArch64 ELF (and, if downloaded, a real one) through
 #     the kernel and checks the explanation + exit status 126
+#   * checks that AOSC_EXEC_GUARD_QEMU=always hands the program over to qemu
 #   * restores everything on exit, including on failure
 #
 #   scripts/test.sh && sudo scripts/kernel-test.sh
@@ -19,6 +20,7 @@ GUARD=$PWD/target/release/aosc-exec-guard
 [ -x "$GUARD" ] || { echo "找不到 $GUARD；请先运行 scripts/test.sh" >&2; exit 1; }
 
 TMP=tests/tmp
+mkdir -p "$TMP/home"
 [ -f "$TMP/aarch64.elf" ] || { echo "找不到测试文件 $TMP/aarch64.elf；请先运行 scripts/test.sh" >&2; exit 1; }
 [ -x "$TMP/aarch64.elf" ] || chmod +x "$TMP/aarch64.elf"
 
@@ -32,10 +34,12 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # Read a (procfs) file with shell builtins only: works even when exec is broken.
 show_file() { local line; while IFS= read -r line; do printf '  %s\n' "$line"; done < "$1"; }
 
-# Run a foreign binary the way a user would, forcing text mode so that no
-# dialog ever blocks this script.
+# Run a foreign binary the way a user would: text mode so that no dialog ever
+# blocks this script, a private HOME so no saved “不再询问” answer leaks in, and
+# AOSC_EXEC_GUARD_QEMU=never so the guard explains instead of asking/running.
 run_target() {
-  env -u DISPLAY -u WAYLAND_DISPLAY AOSC_EXEC_GUARD_NO_DIALOG=1 "$@"
+  env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_CONFIG_HOME AOSC_EXEC_GUARD_NO_DIALOG=1 \
+    AOSC_EXEC_GUARD_QEMU=never HOME="$PWD/$TMP/home" "$@"
 }
 
 QEMU_WAS_ENABLED=no
@@ -68,7 +72,7 @@ show_file "$BM/status"
 
 step "注册 guard 条目（interpreter=$GUARD）"
 [ -e "$ENTRY" ] && echo -1 > "$ENTRY"
-line=$(< data/binfmt.d/aosc-exec-guard-aarch64.conf)
+line=$(< data/binfmt.d/zz-aosc-exec-guard-aarch64.conf)
 line=${line//\/usr\/bin\/aosc-exec-guard/$GUARD}
 printf '%s\n' "$line" > "$BM/register"
 show_file "$ENTRY"
@@ -111,6 +115,20 @@ if [ -x "$TMP/busybox-aarch64" ]; then
   set -e
   printf '%s\nexit=%s\n' "$out" "$code"
   [ "$code" -eq 126 ] || fail "exit code should be 126, got $code"
+fi
+
+if [ -x "$TMP/busybox-aarch64" ] && [ "$QEMU_WAS_ENABLED" = yes ]; then
+  step 'guard 转发给 qemu：AOSC_EXEC_GUARD_QEMU=always 时 busybox 真的跑起来'
+  # 转发要求 qemu 条目处于启用状态（上一步把它禁用过）
+  [ -e "$QEMU_ENTRY" ] && echo 1 > "$QEMU_ENTRY"
+  set +e
+  out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_CONFIG_HOME AOSC_EXEC_GUARD_QEMU=always \
+    HOME="$PWD/$TMP/home" "$TMP/busybox-aarch64" uname -m 2>&1)
+  code=$?
+  set -e
+  printf '%s\nexit=%s\n' "$out" "$code"
+  [ "$code" -eq 0 ] || fail "busybox 应经 guard 交给 qemu 运行，实际退出码 $code"
+  case "$out" in *aarch64*) ;; *) fail 'busybox 的 uname -m 应输出 aarch64' ;; esac
 fi
 
 step '恢复 qemu-aarch64，并确认模拟器行为恢复'

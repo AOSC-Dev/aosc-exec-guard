@@ -5,9 +5,10 @@
 #   * shows the effect of registration order:
 #       - a freshly registered guard entry wins over the boot-time qemu entry
 #         (later registration = higher precedence, measured)
-#       - in a clean boot order (files applied sorted by name, so
-#         aosc-exec-guard-* before qemu-*), qemu-aarch64 wins and emulator
-#         users are not hijacked by the guard
+#       - in a clean boot order (files applied sorted by name), the conf named
+#         zz-aosc-exec-guard-* comes after qemu-* and therefore wins: the guard
+#         is the one that gets asked first and offers to run the program
+#         through qemu (AOSC_EXEC_GUARD_QEMU / the “不再询问” answer decides)
 #   * reverts everything on exit, including on failure
 #
 #   scripts/test.sh && sudo scripts/systemd-install-test.sh
@@ -22,8 +23,8 @@ case "$(uname -m)" in
   aarch64|arm64) echo '本机是 aarch64：跳过（条目会劫持解释器自身）' >&2; exit 1;;
 esac
 
-CONF_SRC=$PWD/data/binfmt.d/aosc-exec-guard-aarch64.conf
-CONF_DST=/usr/lib/binfmt.d/aosc-exec-guard-aarch64.conf
+CONF_SRC=$PWD/data/binfmt.d/zz-aosc-exec-guard-aarch64.conf
+CONF_DST=/usr/lib/binfmt.d/zz-aosc-exec-guard-aarch64.conf
 GUARD=$PWD/target/release/aosc-exec-guard
 [ -x "$GUARD" ] || { echo "找不到 $GUARD；请先运行 scripts/test.sh" >&2; exit 1; }
 BM=/proc/sys/fs/binfmt_misc
@@ -44,17 +45,18 @@ show_entry() {
   fi
 }
 
-probe() { # run the fake aarch64 file and report which entry handled it
+probe() { # run the fake aarch64 file; sets $probe_result to guard/qemu/none
   set +e
   local out code
-  out=$(env -u DISPLAY -u WAYLAND_DISPLAY AOSC_EXEC_GUARD_NO_DIALOG=1 "$TMP/aarch64.elf" 2>&1)
+  out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_CONFIG_HOME AOSC_EXEC_GUARD_NO_DIALOG=1 \
+    AOSC_EXEC_GUARD_QEMU=never HOME="$PWD/$TMP/home" "$TMP/aarch64.elf" 2>&1)
   code=$?
   set -e
   printf '%s\nexit=%s\n' "$out" "$code"
   case "$out" in
-    *'无法运行'*)  echo '=> guard 先匹配' ;;
-    *qemu*)        echo '=> qemu-aarch64 先匹配' ;;
-    *)             echo '=> 未被任何条目匹配' ;;
+    *'无法运行'*)  probe_result=guard; echo '=> guard 先匹配' ;;
+    *qemu*)        probe_result=qemu;  echo '=> qemu-aarch64 先匹配' ;;
+    *)             probe_result=none;  echo '=> 未被任何条目匹配' ;;
   esac
 }
 
@@ -76,6 +78,7 @@ show_entry aosc-exec-guard-aarch64
 
 step '运行时优先级：服务刚注册的 guard vs 开机时的 qemu'
 probe
+[ "$probe_result" = guard ] || echo '（注意：本次不是 guard 先匹配）'
 
 step '模拟干净启动顺序：清空所有条目，让 systemd-binfmt 按文件名排序重放'
 for f in "$BM"/*; do
@@ -89,6 +92,14 @@ systemctl restart systemd-binfmt.service
 show_entry aosc-exec-guard-aarch64
 show_entry qemu-aarch64
 probe
+# zz- 前缀让 guard 的 conf 排在 qemu-* 之后应用（后应用者优先），
+# 于是干净启动时也由 guard 先接住、再询问用户要不要用仿真器运行。
+if [ "$probe_result" = guard ]; then
+  echo '=> 符合预期：zz- 名让 guard 排在 qemu 之后应用，所以 guard 先匹配'
+else
+  echo 'FAIL: 干净启动顺序下应当是 guard 先匹配（conf 名以 zz- 开头）' >&2
+  exit 1
+fi
 
 step '清理：移除 conf、重放，并确认 guard 条目消失'
 rm -f "$CONF_DST"
@@ -106,7 +117,8 @@ echo '=> guard 条目已移除'
 if [ -x "$TMP/busybox-aarch64" ]; then
   step '最终确认：qemu 仍能模拟运行 aarch64'
   set +e
-  out=$(env -u DISPLAY -u WAYLAND_DISPLAY "$TMP/busybox-aarch64" true 2>&1)
+  out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_CONFIG_HOME AOSC_EXEC_GUARD_QEMU=never \
+    HOME="$PWD/$TMP/home" "$TMP/busybox-aarch64" true 2>&1)
   code=$?
   set -e
   printf '%s\nexit=%s\n' "$out" "$code"

@@ -1,6 +1,6 @@
 # aosc-exec-guard（PoC）
 
-给 AOSC OS 做"程序跑不起来时给出人话解释"的第一步：**架构不兼容的 ELF** 在执行时不再只有一句 `Exec format error`；从图形会话启动时还会弹框说明原因。
+给 AOSC OS 做"程序跑不起来时给出人话解释"的第一步：**架构不兼容的 ELF** 在执行时不再只有一句 `Exec format error`；从图形会话启动时还会弹框说明原因；如果本机装了对应架构的模拟器（qemu-user + 它的 binfmt 条目），还会先问一句"要不要用模拟器运行"（图形弹框里带"不再询问"复选框）。
 
 对应 macOS 的体验：双击一个跑不了的程序时，会明确告诉你"它不被本机支持"，而不是静默失败。实现完全走内核现成的 `binfmt_misc` 机制，**不需要桌面环境改动，也不需要内核补丁**。
 
@@ -13,11 +13,13 @@
 - 所以本仓库是"一个架构一个条目"：
 
   ```
-  data/binfmt.d/aosc-exec-guard-aarch64.conf     # aarch64（ARM64）
-  data/binfmt.d/aosc-exec-guard-riscv64.conf     # RISC-V 64
-  data/binfmt.d/aosc-exec-guard-loongarch64.conf # LoongArch 64
-  data/binfmt.d/aosc-exec-guard-arm.conf         # ARM（32 位）
+  data/binfmt.d/zz-aosc-exec-guard-aarch64.conf     # aarch64（ARM64）
+  data/binfmt.d/zz-aosc-exec-guard-riscv64.conf     # RISC-V 64
+  data/binfmt.d/zz-aosc-exec-guard-loongarch64.conf # LoongArch 64
+  data/binfmt.d/zz-aosc-exec-guard-arm.conf         # ARM（32 位）
   ```
+
+  `zz-` 前缀不是随手起的：systemd-binfmt 按文件名排序应用 conf、后应用者优先（实测），`zz-` 让 guard 排在 `qemu-*` 之后 → **guard 先接住外来架构的程序**，再由它决定要不要交给模拟器（见下）。
 
   例如 aarch64 条目：
 
@@ -30,7 +32,12 @@
   - 读 ELF 头（只读前 20 字节），区分三种情况：外来架构 / 本机架构（本不该被条目命中，防呆）/ 根本不是 ELF；
   - 输出解释到 stderr；如果是从图形会话启动（有 `DISPLAY`/`WAYLAND_DISPLAY`，且 stdout/stderr 都不是终端，也不是 systemd 服务），再调 `zenity`/`kdialog` 弹框；
   - 退出码 126，保持 shell 对"找到但无法执行"的惯例。
-- 开关：`--no-dialog` / `--debug`（等同 `AOSC_EXEC_GUARD_NO_DIALOG=1` / `AOSC_EXEC_GUARD_DEBUG=1`，环境变量存在即开启）。内核调用时命令行只能是"程序路径 + 原程序参数"，没法给 guard 传选项，所以环境变量是内核路径下唯一可用的开关；命令行选项只服务于手动运行。
+- 模拟器询问与转发：如果目标架构有**已启用**的 qemu-user binfmt 条目（解释器文件还在），guard 按 `--qemu` / `AOSC_EXEC_GUARD_QEMU` / 用户配置分三种处理：
+  - `ask`（默认）：图形会话弹询问框（复选框"不再询问"），终端里问 `[y/N]`（`a`=总是运行、`s`=总是不运行）；两种界面都拿不到时（服务、无终端、无对话框）保持老行为——直接交给模拟器；
+  - `always`：直接换成模拟器运行，argv 布局与内核调用模拟器时一致（`<解释器> <程序路径> <原参数…>`）；
+  - `never`：只解释，不运行。
+  勾了"不再询问"（或终端里回答 `a`/`s`）会把选择写进 `~/.config/aosc-exec-guard.conf`（`qemu = always|never`），删掉该文件即可恢复询问。
+- 开关：`--no-dialog` / `--debug` / `--qemu=<ask|always|never>`（分别等同 `AOSC_EXEC_GUARD_NO_DIALOG=1` / `AOSC_EXEC_GUARD_DEBUG=1` / `AOSC_EXEC_GUARD_QEMU=…`）。内核调用时命令行只能是"程序路径 + 原程序参数"，没法给 guard 传选项，所以环境变量是内核路径下唯一可用的开关；命令行选项只服务于手动运行。`--qemu` 的优先级：命令行 > 环境变量 > 用户配置。
 - 命令行解析用 clap：`aosc-exec-guard [选项] <程序路径> [参数…]`——路径之后的参数一律原样保留，`--debug`、`--help` 之类不会被 guard 抢去解析（它们本来就属于原程序）。
 
 ## 目录
@@ -38,7 +45,7 @@
 ```
 src/main.rs                  guard 本体（Rust；只用 clap 做命令行解析）
 data/binfmt.d/*.conf         /usr/lib/binfmt.d/ 用的注册项（一架构一个）
-scripts/test.sh              本地测试（无 root）：单测 + 直测 + stub zenity 弹框分支
+scripts/test.sh              本地测试（无 root）：单测 + 直测 + stub zenity 弹框 / stub qemu 的询问转发分支
 scripts/get-test-binary.sh   下载真实的 aarch64 静态二进制（Alpine busybox-static）
 scripts/kernel-test.sh       内核端到端测试（需要 root，自动清理/恢复）
 scripts/systemd-install-test.sh 真实安装路径测试（/usr/lib/binfmt.d/ + systemd-binfmt，需要 root）
@@ -70,19 +77,26 @@ $ scripts/test.sh && sudo scripts/kernel-test.sh
 $ sudo sh -c 'echo -1 > /proc/sys/fs/binfmt_misc/aosc-exec-guard-aarch64'
 ```
 
+恢复"每次都问"（清掉"不再询问"记住的选择）：
+
+```console
+$ rm -f ~/.config/aosc-exec-guard.conf
+```
+
 ## 内核端到端测试做了什么
 
 1. 先做本机架构防护（本机是 aarch64 就拒绝执行），再注册 `aosc-exec-guard-aarch64` 条目；
 2. 注册后立刻用 `/usr/bin/true` 冒烟：本机程序必须还能跑，否则立即中止并清理；
 3. 同时保留 `qemu-aarch64` 条目，观察两者谁先匹配（注册顺序语义实测）；
 4. 暂时禁用 `qemu-aarch64`，跑一个伪造的 aarch64 ELF 和（若已下载）真实 busybox，检查解释文本与退出码 126；
-5. 恢复 `qemu-aarch64`、注销 guard，确认原来的模拟器行为回来。
+5. 把 `AOSC_EXEC_GUARD_QEMU=always` 交给真实的 `binfmt_misc` 调用链，让 busybox 经 guard → qemu 跑起来（`uname -m` 输出 aarch64）；
+6. 恢复 `qemu-aarch64`、注销 guard，确认原来的模拟器行为回来。
 
 `scripts/systemd-install-test.sh` 另走"真实安装路径"：把 conf 装进 `/usr/lib/binfmt.d/`（解释器指向本仓库构建的二进制）、由 `systemd-binfmt` 应用，再清空条目按文件名顺序重放一遍看优先级，最后移除 conf。
 
 ## 已知问题 / 待办
 
-- **与模拟器条目的优先级**：已实测，见"实测结论"——systemd-binfmt 按文件名排序应用 conf、后应用者优先；`aosc-exec-guard-*` 排在 `qemu-*` 前面，**干净启动时 qemu 条目优先**，装了模拟器的用户不受影响。若想让 guard 先"询问"，把 conf 改名排到后面（如 `zz-aosc-exec-guard-*`），或以后在 guard 内部做转发。
+- **与模拟器条目的优先级**：已实测，见"实测结论"——systemd-binfmt 按文件名排序应用 conf、后应用者优先；`zz-aosc-exec-guard-*` 排在 `qemu-*` 之后，所以**干净启动时 guard 先匹配**，由它询问/转发给模拟器（`AOSC_EXEC_GUARD_QEMU=never` 可让它不插手）。不想让 guard 介入的发行版/用户，把 conf 删除或改回 `aosc-exec-guard-*` 即可，qemu 条目会照旧直接接管。
 - **ENOENT 盲区**：缺解释器的情况（如 32 位程序找不到 `/lib/ld-linux.so.2`、shebang 解释器不存在）报的是 `ENOENT` 而不是 `ENOEXEC`，`binfmt_misc` 拦不到，需要另行设计。
 - 文案暂未接 i18n（先用中文）；生产构建建议静态链接。
 
@@ -91,7 +105,7 @@ $ sudo sh -c 'echo -1 > /proc/sys/fs/binfmt_misc/aosc-exec-guard-aarch64'
 1. **匹配时机**：`binfmt_misc` 条目在每次 exec 时先行匹配（先于 `binfmt_elf`）；命中即接管，不再尝试原生加载。
 2. **优先级**：条目按注册顺序迭代，**后注册者优先**；运行时手工注册（`kernel-test.sh` 的做法）会盖过开机时就存在的条目。
 3. **systemd-binfmt 的顺序**：按文件名排序应用 conf 并逐个（重）注册；冲突时**最后应用的那个胜出**。
-4. **于是**：`aosc-exec-guard-*.conf`（a）排在 `qemu-*.conf`（q）之前 → 干净启动时 qemu 后应用、优先级更高 → **模拟器用户不会被 guard 抢走**；没有模拟器条目的架构则由 guard 解释。
+4. **于是**：`zz-aosc-exec-guard-*.conf`（z）排在 `qemu-*.conf`（q）之后 → 干净启动时 guard 后应用、优先级更高 → **guard 先接住外来架构的程序**，再按 `--qemu` / `AOSC_EXEC_GUARD_QEMU` / 用户配置决定是转发给模拟器还是只解释（`kernel-test.sh`、`systemd-install-test.sh` 都会验证这一步）。
 5. **清理**：`systemd-binfmt` 重启会注销"不在配置里"的条目；也可手动 `echo -1 > /proc/sys/fs/binfmt_misc/<条目名>`。
 6. **打包注意**：conf 带 `F` 标志 → 注册时解释器文件必须已存在（试过不存在的路径，服务直接报 `No such file or directory` 注册失败）；二进制和 conf 在同一包里安装没问题。
 7. **端到端行为**：伪造和真实的 aarch64 ELF 都被 guard 接管（中文解释 + 退出码 126）；禁用/恢复 qemu、条目清理均验证通过。
