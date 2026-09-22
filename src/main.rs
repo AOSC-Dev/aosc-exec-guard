@@ -19,6 +19,7 @@
 mod config;
 mod elf;
 mod handover;
+mod i18n;
 mod platform;
 mod prompt;
 mod qemu;
@@ -27,11 +28,12 @@ use std::env;
 use std::ffi::OsString;
 use std::path::Path;
 
-use clap::Parser;
+use clap::{ArgAction, Parser};
 
 use crate::config::{QemuMode, resolve_qemu_mode, save_qemu_mode};
 use crate::elf::{Verdict, build_message, classify, native_machine};
 use crate::handover::Action;
+use crate::i18n::lang;
 use crate::platform::{
     DisplayMode, decide_mode, env_switch, gui_available, in_container, in_service, in_terminal,
 };
@@ -43,19 +45,32 @@ const EXIT_CANNOT_EXEC: i32 = 126;
 
 /// 说明一个程序为何无法在本机运行（binfmt_misc 解释器）。
 ///
-/// 内核通过 binfmt_misc 调用时为
-/// `aosc-exec-guard <程序路径> <原程序的参数…>`：路径之后的内容一律属于
-/// 原程序，guard 只是原样接受、不当成自己的选项解析。
+/// 内核通过 binfmt_misc 调用时为 `aosc-exec-guard <程序路径> <原程序的参数…>`：
+/// 路径之后的内容一律属于原程序，guard 只是原样接受、不当成自己的选项解析。
+///
+/// 用户可见的文字（含 `--help`）都放在 `i18n.rs`，在属性里用 `lang().xxx()`
+/// 在运行时取（跟 oma 的 `fl!()` 一个路子）：clap 的 `-h/--help` 与 `-v/--version`
+/// 是禁掉内置的、自己用本地化文案重加的；“用法:”标题与小节标题分别由
+/// `help_template`、`next_help_heading` 提供。doc 注释只当开发文档用，clap 不会
+/// 拿它渲染（`help`/`about` 都显式写了）。
 #[derive(Debug, Parser)]
 #[command(
     version,
-    override_usage = "aosc-exec-guard [选项] <程序路径> [参数…]",
-    after_help = "（通常由内核通过 binfmt_misc 调用，无需手动运行；`--handover` 例外——要手动以 root 运行。）"
+    about = lang().cli_about(),
+    long_about = None, // 别让上面的 doc 注释（开发文档）漏进帮助里
+    override_usage = lang().cli_usage(),
+    after_help = lang().cli_after_help(),
+    help_template = lang().cli_help_template(),
+    next_help_heading = lang().cli_options_heading(),
+    disable_help_flag = true,
+    disable_version_flag = true
 )]
 struct Cli {
     /// 无法运行的程序路径（其后的参数原属于原程序）
     #[arg(
-        value_name = "程序路径",
+        value_name = lang().cli_path_value(),
+        help = lang().cli_path_help(),
+        help_heading = lang().cli_arguments_heading(),
         required_unless_present = "handover",
         trailing_var_arg = true,
         allow_hyphen_values = true
@@ -63,31 +78,40 @@ struct Cli {
     argv: Vec<OsString>,
 
     /// 永远不弹框（相当于 AOSC_EXEC_GUARD_NO_DIALOG=1）
-    #[arg(long)]
+    #[arg(long, help = lang().cli_no_dialog_help())]
     no_dialog: bool,
 
-    /// 打印模式判定等调试信息（含 binfmt 注册表可见性；相当于 AOSC_EXEC_GUARD_DEBUG=1）
-    #[arg(long)]
+    /// 打印模式判定等调试信息（相当于 AOSC_EXEC_GUARD_DEBUG=1）
+    #[arg(long, help = lang().cli_debug_help())]
     debug: bool,
 
-    /// 检测到 qemu-user 仿真器时怎么办（环境变量 AOSC_EXEC_GUARD_QEMU；默认读用户配置）
-    #[arg(long, value_enum, value_name = "模式")]
+    /// 检测到 qemu-user 仿真器时怎么办（环境变量 AOSC_EXEC_GUARD_QEMU）
+    #[arg(long, value_enum, value_name = lang().cli_mode_value(), help = lang().cli_qemu_help())]
     qemu: Option<QemuMode>,
 
-    /// 让 guard 退出、把外架构程序交给内核的 qemu 条目（--handover=off 恢复）
+    /// 让 guard 退出、把外架构程序交给内核的 qemu 条目
     #[arg(
         long,
         value_enum,
-        value_name = "动作",
+        value_name = lang().cli_action_value(),
         num_args = 0..=1,
         default_missing_value = "on",
-        require_equals = true
+        require_equals = true,
+        help = lang().cli_handover_help()
     )]
     handover: Option<Action>,
 
-    /// 跳过确认询问（非交互环境必须加；只对 --handover 有意义）
-    #[arg(long)]
+    /// 跳过确认询问（只对 --handover 有意义）
+    #[arg(long, help = lang().cli_yes_help())]
     yes: bool,
+
+    /// 显示帮助信息
+    #[arg(short, long, action = ArgAction::Help, help = lang().cli_help_help())]
+    help: Option<bool>,
+
+    /// 显示版本号
+    #[arg(short, long, action = ArgAction::Version, help = lang().cli_version_help())]
+    version: Option<bool>,
 }
 
 fn main() {
@@ -97,6 +121,7 @@ fn main() {
     }
     let (target, program_args) = cli.argv.split_first().expect("clap 保证至少有一个程序路径");
     let target = Path::new(target);
+    let lang = i18n::lang();
 
     let no_dialog = cli.no_dialog || env_switch("AOSC_EXEC_GUARD_NO_DIALOG");
     let debug = cli.debug || env_switch("AOSC_EXEC_GUARD_DEBUG");
@@ -132,7 +157,7 @@ fn main() {
     {
         let run = match qemu_mode {
             QemuMode::Always => true,
-            QemuMode::Ask => match ask_run_via_qemu(entry, target, info, mode) {
+            QemuMode::Ask => match ask_run_via_qemu(lang, entry, target, info, mode) {
                 Some(outcome) => {
                     if outcome.remember {
                         let remembered = if outcome.run {
@@ -141,7 +166,7 @@ fn main() {
                             QemuMode::Never
                         };
                         if let Err(err) = save_qemu_mode(remembered) {
-                            eprintln!("aosc-exec-guard: 无法记住“不再询问”的选择：{err}");
+                            eprintln!("aosc-exec-guard: {}", lang.cannot_remember(&err));
                         }
                     }
                     outcome.run
@@ -153,14 +178,53 @@ fn main() {
         };
         if run {
             let err = run_via_qemu(entry, target, program_args);
-            eprintln!("aosc-exec-guard: 无法启动 {}：{err}", entry.name);
+            eprintln!("aosc-exec-guard: {}", lang.cannot_start(&entry.name, &err));
         }
     }
 
-    let message = build_message(target, env::consts::ARCH, &verdict, qemu_entry.as_ref());
+    let message = build_message(
+        lang,
+        target,
+        env::consts::ARCH,
+        &verdict,
+        qemu_entry.as_ref(),
+    );
     eprintln!("aosc-exec-guard: {message}");
     if mode == DisplayMode::Dialog {
-        let _ = show_dialog("无法运行此程序", &message);
+        let _ = show_dialog(lang.dialog_title(), &message);
     }
     std::process::exit(EXIT_CANNOT_EXEC);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// `--help` 渲染出来也是本地化的（语言是进程级的，这里就按当前语言对一遍）。
+    #[test]
+    fn help_uses_the_current_language() {
+        let lang = i18n::lang();
+        let mut command = Cli::command();
+        let rendered = command.render_help().to_string();
+        for expected in [
+            lang.cli_about(),
+            lang.cli_usage(),
+            lang.cli_arguments_heading(),
+            lang.cli_options_heading(),
+            lang.cli_path_help(),
+            lang.cli_help_help(),
+            lang.cli_version_help(),
+            lang.cli_after_help(),
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "帮助里缺少「{expected}」：\n{rendered}"
+            );
+        }
+        assert!(
+            !rendered.contains("{usage}"),
+            "模板占位符不该原样出现：\n{rendered}"
+        );
+    }
 }

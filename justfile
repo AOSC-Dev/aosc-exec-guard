@@ -64,14 +64,16 @@ test: build
     chmod +x "$TMP/aarch64.elf" "$TMP/x86_64.elf"   # the kernel test execs these
 
     # Environment isolation for direct guard runs: no GUI/service context, a
-    # private HOME (so a saved “不再询问” answer cannot leak in) and an explicit
-    # binfmt dir (so a host-installed qemu entry cannot change the outcome).
+    # private HOME (so a saved “不再询问” answer cannot leak in), an explicit
+    # binfmt dir (so a host-installed qemu entry cannot change the outcome)
+    # and a pinned language (so the assertions do not depend on the locale).
     # stdin is /dev/null, so the terminal prompt never blocks a scripted run.
     guard_env() { # $1 = binfmt dir, rest = command
       local binfmt_dir=$1
       shift
       env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE -u INVOCATION_ID -u XDG_CONFIG_HOME \
-        HOME="$PWD/$TMP/home" AOSC_EXEC_GUARD_BINFMT_DIR="$binfmt_dir" "$@" </dev/null
+        HOME="$PWD/$TMP/home" AOSC_EXEC_GUARD_BINFMT_DIR="$binfmt_dir" AOSC_EXEC_GUARD_LANG=zh_CN \
+        "$@" </dev/null
     }
     run_guard() { guard_env "$PWD/$TMP/binfmt-empty" "$GUARD" "$@"; }
     run_guard_qemu() { guard_env "$PWD/$TMP/binfmt" "$GUARD" "$@"; }
@@ -104,6 +106,18 @@ test: build
     printf '%s\nexit=%s\n' "$out" "$code"
     [ "$code" -eq 126 ] || fail "exit code should be 126, got $code"
     case "$out" in *ELF*) ;; *) fail 'message should mention ELF' ;; esac
+
+    step 'i18n: AOSC_EXEC_GUARD_LANG=en 时输出英文'
+    set +e
+    out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_CONFIG_HOME HOME="$PWD/$TMP/home" \
+      AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/binfmt-empty" AOSC_EXEC_GUARD_LANG=en \
+      "$GUARD" "$TMP/aarch64.elf" 2>&1)
+    code=$?
+    set -e
+    printf '%s\nexit=%s\n' "$out" "$code"
+    [ "$code" -eq 126 ] || fail "English run should still exit 126, got $code"
+    case "$out" in *'cannot run'*) ;; *) fail 'AOSC_EXEC_GUARD_LANG=en should give English text' ;; esac
+    case "$out" in *无法*) fail 'English output should not contain Chinese text' ;; esac
 
     step 'CLI: --help / --version / missing target'
     "$GUARD" --help >/dev/null || fail '--help should exit 0'
@@ -207,7 +221,7 @@ test: build
     step 'dialog branch (stub zenity, no window is opened)'
     set +e
     env -u INVOCATION_ID -u XDG_CONFIG_HOME DISPLAY=:99 AOSC_GUARD_TEST_LOG="$LOG" AOSC_EXEC_GUARD_DEBUG=1 \
-      HOME="$PWD/$TMP/home" AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/binfmt-empty" \
+      HOME="$PWD/$TMP/home" AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/binfmt-empty" AOSC_EXEC_GUARD_LANG=zh_CN \
       PATH="$TMP/bin:$PATH" "$GUARD" "$TMP/aarch64.elf" </dev/null > "$TMP/guard.out" 2> "$TMP/guard.err"
     code=$?
     set -e
@@ -249,7 +263,7 @@ test: build
     step 'qemu: terminal menu (pty, dialoguer): 运行 / 不运行 / 总是'
     cat > "$TMP/bin/ask-guard" <<EOF
     #!/usr/bin/env bash
-    export HOME="$PWD/$TMP/home" AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/binfmt" AOSC_EXEC_GUARD_QEMU=ask
+    export HOME="$PWD/$TMP/home" AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/binfmt" AOSC_EXEC_GUARD_QEMU=ask AOSC_EXEC_GUARD_LANG=zh_CN
     unset DISPLAY WAYLAND_DISPLAY XDG_SESSION_TYPE INVOCATION_ID XDG_CONFIG_HOME
     exec "$GUARD" "\$@"
     EOF
@@ -292,6 +306,7 @@ test: build
       set +e
       env -u INVOCATION_ID -u XDG_CONFIG_HOME DISPLAY=:99 AOSC_GUARD_TEST_LOG="$LOG" \
         HOME="$PWD/$TMP/home" AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/binfmt" AOSC_EXEC_GUARD_QEMU=ask \
+        AOSC_EXEC_GUARD_LANG=zh_CN \
         PATH="$TMP/bin:$PATH" "$@" "$GUARD" "$TMP/aarch64.elf" </dev/null > "$TMP/g.out" 2> "$TMP/g.err"
       code=$?
       set -e
@@ -385,7 +400,7 @@ test: build
     # guard 只认 binfmt_misc 注册表（本地或宿主机的）；两边都看不见/没有条目就
     # 解释退出，而且即使在终端里也不能弹菜单（不猜 /usr/bin 路径）。
     set +e
-    printf '\n' | script -qec "env -u DISPLAY -u WAYLAND_DISPLAY -u INVOCATION_ID -u XDG_CONFIG_HOME HOME=$PWD/$TMP/home AOSC_EXEC_GUARD_BINFMT_DIR=$PWD/$TMP/no-such-dir $GUARD $TMP/aarch64.elf" /dev/null \
+    printf '\n' | script -qec "env -u DISPLAY -u WAYLAND_DISPLAY -u INVOCATION_ID -u XDG_CONFIG_HOME HOME=$PWD/$TMP/home AOSC_EXEC_GUARD_BINFMT_DIR=$PWD/$TMP/no-such-dir AOSC_EXEC_GUARD_LANG=zh_CN $GUARD $TMP/aarch64.elf" /dev/null \
       > "$TMP/pty2.out" 2>&1
     code=$?
     set -e
@@ -398,7 +413,7 @@ test: build
 
     step 'handover: 宿主上下文之外拒绝'
     set +e
-    out=$(env AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/no-such-dir" "$GUARD" --handover --yes 2>&1)
+    out=$(env AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/no-such-dir" AOSC_EXEC_GUARD_LANG=zh_CN "$GUARD" --handover --yes 2>&1)
     code=$?
     set -e
     printf '%s\nexit=%s\n' "$out" "$code"
@@ -425,7 +440,7 @@ test: build
     printf 'enabled\ninterpreter %s\nflags: OCF\n' "$PWD/$TMP/bin/qemu-aarch64" > "$TMP/hand/binfmt/qemu-aarch64"
     printf '# 测试用 conf（让位只改名、不解析内容）\n:aosc-exec-guard-aarch64:M::x:/usr/bin/aosc-exec-guard:F\n' \
       > "$TMP/hand/conf/zz-aosc-exec-guard.conf"
-    hand_env() { env AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/hand/binfmt" AOSC_EXEC_GUARD_CONF_DIRS="$PWD/$TMP/hand/conf" "$@"; }
+    hand_env() { env AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/hand/binfmt" AOSC_EXEC_GUARD_CONF_DIRS="$PWD/$TMP/hand/conf" AOSC_EXEC_GUARD_LANG=zh_CN "$@"; }
 
     set +e
     out=$(hand_env "$GUARD" --handover --yes 2>&1)
@@ -515,7 +530,7 @@ kernel-test:
     # AOSC_EXEC_GUARD_QEMU=never so the guard explains instead of asking/running.
     run_target() {
       env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_CONFIG_HOME AOSC_EXEC_GUARD_NO_DIALOG=1 \
-        AOSC_EXEC_GUARD_QEMU=never HOME="$PWD/$TMP/home" "$@"
+        AOSC_EXEC_GUARD_QEMU=never AOSC_EXEC_GUARD_LANG=zh_CN HOME="$PWD/$TMP/home" "$@"
     }
 
     QEMU_WAS_ENABLED=no
@@ -609,7 +624,7 @@ kernel-test:
     # 那一份；guard 是全静态的，所以 rootfs 里什么都不用放（动态解释器会以
     # ENOENT 收场——那正是把动态构建删掉的原因）。
     set +e
-    out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR" /prog 2>&1)
+    out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 AOSC_EXEC_GUARD_LANG=zh_CN chroot "$CHR" /prog 2>&1)
     code=$?
     set -e
     printf '%s\nexit=%s\n' "$out" "$code"
@@ -620,7 +635,7 @@ kernel-test:
     # 挂了 /proc 后，guard 能看出自己在 chroot 里（提示相应改变）
     mount -t proc proc "$CHR/proc"
     set +e
-    out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR" /prog 2>&1)
+    out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 AOSC_EXEC_GUARD_LANG=zh_CN chroot "$CHR" /prog 2>&1)
     code=$?
     set -e
     umount "$CHR/proc"
@@ -633,7 +648,7 @@ kernel-test:
       [ -e "$QEMU_ENTRY" ] && echo 1 > "$QEMU_ENTRY"
       mount -t proc proc "$CHR/proc"
       set +e
-      out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR" /prog 2>&1)
+      out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 AOSC_EXEC_GUARD_LANG=zh_CN chroot "$CHR" /prog 2>&1)
       code=$?
       set -e
       printf '%s\nexit=%s\n' "$out" "$code"
@@ -642,7 +657,7 @@ kernel-test:
       if [ -x "$TMP/busybox-aarch64" ]; then
         cp "$TMP/busybox-aarch64" "$CHR/busybox"
         set +e
-        out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR" /busybox uname -m 2>&1)
+        out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 AOSC_EXEC_GUARD_LANG=zh_CN chroot "$CHR" /busybox uname -m 2>&1)
         code=$?
         set -e
         printf '%s\nexit=%s\n' "$out" "$code"
@@ -665,7 +680,7 @@ kernel-test:
       chmod +x "$CHR3/prog"
       cp "$TMP/busybox-aarch64" "$CHR3/busybox"
       set +e
-      out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR3" /prog 2>&1)
+      out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 AOSC_EXEC_GUARD_LANG=zh_CN chroot "$CHR3" /prog 2>&1)
       code=$?
       set -e
       printf '%s\nexit=%s\n' "$out" "$code"
@@ -767,7 +782,7 @@ systemd-install-test:
       set +e
       local out code
       out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_CONFIG_HOME AOSC_EXEC_GUARD_NO_DIALOG=1 \
-        AOSC_EXEC_GUARD_QEMU=never HOME="$PWD/$TMP/home" "$TMP/aarch64.elf" 2>&1)
+        AOSC_EXEC_GUARD_QEMU=never AOSC_EXEC_GUARD_LANG=zh_CN HOME="$PWD/$TMP/home" "$TMP/aarch64.elf" 2>&1)
       code=$?
       set -e
       printf '%s\nexit=%s\n' "$out" "$code"

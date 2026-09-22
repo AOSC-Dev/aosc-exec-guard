@@ -8,6 +8,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+use crate::i18n::Lang;
 use crate::platform::{in_chroot, in_container};
 use crate::qemu::{QemuEntry, registry_visible};
 
@@ -54,7 +55,18 @@ pub enum Verdict {
     /// The file targets the host machine, but the kernel refused it anyway.
     NativeButRejected(ElfInfo),
     /// Not a (readable) ELF file.
-    NotElf(&'static str),
+    NotElf(NotElfReason),
+}
+
+/// 为什么“不是能跑的 ELF”（具体文案在 i18n 里）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotElfReason {
+    CannotRead,
+    TooSmall,
+    NotElf,
+    BadClass,
+    BadEndian,
+    ReadFailed,
 }
 
 /// e_machine value of the machine we are running on, if we know it.
@@ -97,25 +109,25 @@ pub fn machine_name(machine: u16) -> Option<&'static str> {
     })
 }
 
-pub fn describe(machine: u16) -> String {
+pub fn describe(lang: Lang, machine: u16) -> String {
     match machine_name(machine) {
         Some(name) => name.to_string(),
-        None => format!("未知架构（e_machine=0x{machine:x}）"),
+        None => lang.unknown_machine(machine),
     }
 }
 
-pub fn parse_elf(bytes: &[u8]) -> Result<ElfInfo, &'static str> {
+pub fn parse_elf(bytes: &[u8]) -> Result<ElfInfo, NotElfReason> {
     if bytes.len() < E_MACHINE_OFF + 2 {
-        return Err("文件太小，不是一个有效的 ELF 可执行文件");
+        return Err(NotElfReason::TooSmall);
     }
     if &bytes[0..4] != b"\x7fELF" {
-        return Err("文件不是 ELF 可执行文件");
+        return Err(NotElfReason::NotElf);
     }
 
     let class = match bytes[EI_CLASS] {
         ELFCLASS32 => ElfClass::Bits32,
         ELFCLASS64 => ElfClass::Bits64,
-        _ => return Err("ELF 头部的位宽字段无法识别"),
+        _ => return Err(NotElfReason::BadClass),
     };
 
     let (endian, machine) = match bytes[EI_DATA] {
@@ -127,7 +139,7 @@ pub fn parse_elf(bytes: &[u8]) -> Result<ElfInfo, &'static str> {
             Endian::Big,
             u16::from_be_bytes([bytes[E_MACHINE_OFF], bytes[E_MACHINE_OFF + 1]]),
         ),
-        _ => return Err("ELF 头部的字节序字段无法识别"),
+        _ => return Err(NotElfReason::BadEndian),
     };
 
     Ok(ElfInfo {
@@ -141,13 +153,13 @@ pub fn parse_elf(bytes: &[u8]) -> Result<ElfInfo, &'static str> {
 pub fn classify(path: &Path, native: Option<u16>) -> Verdict {
     let mut file = match File::open(path) {
         Ok(file) => file,
-        Err(_) => return Verdict::NotElf("无法读取该文件"),
+        Err(_) => return Verdict::NotElf(NotElfReason::CannotRead),
     };
     let mut header = [0u8; E_MACHINE_OFF + 2];
     if let Err(err) = file.read_exact(&mut header) {
         return Verdict::NotElf(match err.kind() {
-            std::io::ErrorKind::UnexpectedEof => "文件太小，不是一个有效的 ELF 可执行文件",
-            _ => "读取文件失败",
+            std::io::ErrorKind::UnexpectedEof => NotElfReason::TooSmall,
+            _ => NotElfReason::ReadFailed,
         });
     }
     match parse_elf(&header) {
@@ -160,56 +172,41 @@ pub fn classify(path: &Path, native: Option<u16>) -> Verdict {
 }
 
 /// “该程序是为 X 构建的 N 位程序，而本机是 Y”。
-pub fn arch_sentence(info: &ElfInfo, native_label: &str) -> String {
-    format!(
-        "该程序是为 {}构建的 {} 位程序，而本机是 {native_label}",
-        describe(info.machine),
-        info.class.bits()
+pub fn arch_sentence(lang: Lang, info: &ElfInfo, native_label: &str) -> String {
+    lang.arch_sentence(
+        &describe(lang, info.machine),
+        info.class.bits(),
+        native_label,
     )
 }
 
 pub fn build_message(
+    lang: Lang,
     path: &Path,
     native_label: &str,
     verdict: &Verdict,
     qemu: Option<&QemuEntry>,
 ) -> String {
-    let path = path.display();
+    let path = path.display().to_string();
     match verdict {
         Verdict::ArchMismatch(info) => {
             let hint = match qemu {
-                Some(entry) => format!(
-                    "提示：本机已安装 {}，设置 AOSC_EXEC_GUARD_QEMU=always 可让它自动运行\
-                     （ask=每次询问、never=从不运行）。",
-                    entry.name
-                ),
+                Some(entry) => lang.hint_emulator_installed(&entry.name),
                 // 宿主机注册的条目在 chroot 里照样会命中；但 guard 找模拟器时
                 // 必须在脚下看到那个文件（F 只让内核重用注册时打开的解释器
                 // 文件，guard 转发时 exec 的仍然是路径）。chroot（没挂 /proc，
                 // 认不出来）、容器里都是这样：没有任何可达路径，只能解释。
                 None if in_chroot() || in_container() || !registry_visible() => {
-                    "提示：看起来在 chroot / 容器 里（或者看不到 binfmt_misc 注册表）：\
-                     这里找不到能用的模拟器条目，guard 转不了。\
-                     如果宿主机装了 qemu-user：到外面（宿主机）上运行 `sudo aosc-exec-guard --handover`，\
-                     让 guard 退出、由内核的 qemu 条目接管——qemu 条目用 F 直接打开宿主机的解释器，\
-                     chroot / 容器 里不需要放 qemu。"
-                        .to_string()
+                    lang.hint_isolated().to_string()
                 }
-                None => "提示：可以安装对应架构的模拟器（qemu-user-static、box64 等）后重试，\
-                         或改用 AOSC OS 原生版本。"
-                    .to_string(),
+                None => lang.hint_install_emulator().to_string(),
             };
-            format!(
-                "无法运行“{path}”：{}。\n{hint}",
-                arch_sentence(info, native_label)
-            )
+            lang.cannot_run(&path, &arch_sentence(lang, info, native_label), &hint)
         }
-        Verdict::NativeButRejected(info) => format!(
-            "无法运行“{path}”：程序架构与本机一致（{}），\
-             但内核拒绝了它，文件可能已损坏或格式不受支持。",
-            describe(info.machine),
-        ),
-        Verdict::NotElf(why) => format!("无法运行“{path}”：{why}。"),
+        Verdict::NativeButRejected(info) => {
+            lang.native_but_rejected(&path, &describe(lang, info.machine))
+        }
+        Verdict::NotElf(reason) => lang.cannot_run_notelf(&path, lang.not_elf_reason(*reason)),
     }
 }
 
@@ -274,10 +271,15 @@ mod tests {
             endian: Endian::Little,
             machine: 0xb7,
         });
-        let message = build_message(Path::new("/tmp/app"), "x86_64", &verdict, None);
+        let message = build_message(Lang::ZhCn, Path::new("/tmp/app"), "x86_64", &verdict, None);
         assert!(message.contains("aarch64"));
         assert!(message.contains("x86_64"));
         assert!(message.contains("64 位"));
+
+        let english = build_message(Lang::En, Path::new("/tmp/app"), "x86_64", &verdict, None);
+        assert!(english.contains("cannot run"));
+        assert!(english.contains("64-bit"));
+        assert!(!english.contains("无法"));
     }
 
     #[test]
@@ -292,7 +294,13 @@ mod tests {
             interpreter: PathBuf::from("/usr/bin/qemu-aarch64-static"),
             flags: "OCF".to_string(),
         };
-        let message = build_message(Path::new("/tmp/app"), "x86_64", &verdict, Some(&entry));
+        let message = build_message(
+            Lang::ZhCn,
+            Path::new("/tmp/app"),
+            "x86_64",
+            &verdict,
+            Some(&entry),
+        );
         assert!(message.contains("qemu-aarch64"));
         assert!(message.contains("AOSC_EXEC_GUARD_QEMU"));
     }
@@ -304,14 +312,14 @@ mod tests {
             endian: Endian::Little,
             machine: 0x3e,
         });
-        let message = build_message(Path::new("/tmp/app"), "x86_64", &verdict, None);
+        let message = build_message(Lang::ZhCn, Path::new("/tmp/app"), "x86_64", &verdict, None);
         assert!(message.contains("损坏"));
     }
 
     #[test]
     fn message_reports_non_elf() {
-        let verdict = Verdict::NotElf("文件不是 ELF 可执行文件");
-        let message = build_message(Path::new("/tmp/app"), "x86_64", &verdict, None);
+        let verdict = Verdict::NotElf(NotElfReason::NotElf);
+        let message = build_message(Lang::ZhCn, Path::new("/tmp/app"), "x86_64", &verdict, None);
         assert!(message.contains("不是 ELF"));
     }
 }

@@ -5,17 +5,18 @@ use std::path::{Path, PathBuf};
 
 use clap::ValueEnum;
 
+use crate::i18n::lang;
 use crate::platform::in_chroot;
 use crate::qemu::registry_visible;
 
 /// 检测到匹配的 qemu-user 条目时怎么办。
+///
+/// 变体上的 doc 注释会变成 clap 的取值说明（clap 只会照列其取值、前缀是写死的英文
+/// possible values，换不了语言），所以变体上不写 doc 注释。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum QemuMode {
-    /// 先询问（默认）
     Ask,
-    /// 总是直接交给仿真器运行
     Always,
-    /// 从不运行，只做解释
     Never,
 }
 
@@ -84,8 +85,8 @@ fn load_saved_qemu_mode() -> Option<QemuMode> {
 }
 
 pub fn save_qemu_mode(mode: QemuMode) -> std::io::Result<()> {
-    let path = user_config_path()
-        .ok_or_else(|| std::io::Error::other("无法定位用户配置目录（HOME / XDG_CONFIG_HOME）"))?;
+    let l = lang();
+    let path = user_config_path().ok_or_else(|| std::io::Error::other(l.no_config_dir()))?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -94,14 +95,7 @@ pub fn save_qemu_mode(mode: QemuMode) -> std::io::Result<()> {
         QemuMode::Always => "always",
         QemuMode::Never => "never",
     };
-    std::fs::write(
-        path,
-        format!(
-            "# aosc-exec-guard 用户设置（“不再询问”时写入）\n\
-             # qemu: ask=每次询问（默认）/ always=总是用仿真器运行 / never=从不运行\n\
-             qemu = {value}\n"
-        ),
-    )
+    std::fs::write(path, l.user_config_content(value))
 }
 
 #[cfg(test)]
