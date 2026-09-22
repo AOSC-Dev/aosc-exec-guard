@@ -146,7 +146,7 @@ fn main() {
     let mode = decide_mode(no_dialog);
     if debug {
         eprintln!(
-            "[debug] mode={mode:?} qemu={} qemu_mode={qemu_mode:?} registry={} container={} gui={} tty={} in_service={}",
+            "[debug] mode={mode:?} qemu={} qemu_mode={qemu_mode:?} registry={} container={} gui={} tty={} in_service={} dialog={}",
             qemu_entry.as_ref().map_or("-", |entry| entry.name.as_str()),
             if registry_visible() {
                 "visible"
@@ -157,6 +157,7 @@ fn main() {
             gui_available(),
             in_terminal(),
             in_service(),
+            crate::prompt::dialog_chain(),
         );
     }
 

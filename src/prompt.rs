@@ -1,9 +1,9 @@
-//! 询问用户：图形询问框（zenity/kdialog）、终端菜单（dialoguer），以及出错时
-//! 的弹框。
+//! 询问用户：图形询问框（KDE 会话下用自带的 Kirigami 弹框，否则 kdialog /
+//! zenity）、终端菜单（dialoguer），以及出错时的弹框。
 
 use std::env;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use dialoguer::{Select, console::Term};
@@ -36,64 +36,234 @@ pub fn ask_run_via_qemu(
     ask_terminal(entry, target, info)
 }
 
+/// 自带的 Kirigami 弹框（`data/dialog.qml`）用的退出码：0/1/2 是 qml 运行时自己的
+/// 码（正常退出 / 加载出错…），所以避开不用。
+const QML_RUN: i32 = 10;
+const QML_DECLINE: i32 = 11;
+const QML_RUN_REMEMBER: i32 = 12;
+
+/// 图形弹框的候选工具。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialogTool {
+    /// 自带的 Kirigami QML 弹框（Qt6 的 qml 运行时 + `dialog.qml`）。
+    Kirigami,
+    /// KDE 的 kdialog（Qt Widgets，跟着 KDE 配色）。
+    Kdialog,
+    /// GNOME 那边的 zenity（GTK）。
+    Zenity,
+}
+
+impl DialogTool {
+    fn name(self) -> &'static str {
+        match self {
+            DialogTool::Kirigami => "qml",
+            DialogTool::Kdialog => "kdialog",
+            DialogTool::Zenity => "zenity",
+        }
+    }
+}
+
+/// 用哪些弹框、什么顺序：KDE 会话里自带的 Kirigami 框最顺眼，别的桌面上用它
+/// 自己的工具（别把 KDE 味道的框摆到 GNOME 上）。
+///
+/// `AOSC_EXEC_GUARD_DIALOG` 可以钉死成某一个（`qml` / `kdialog` / `zenity`），
+/// 测试和自定义用；取值不认识时按自动处理。
+fn dialog_tools() -> Vec<DialogTool> {
+    match env::var("AOSC_EXEC_GUARD_DIALOG").as_deref() {
+        Ok("qml" | "kirigami") => vec![DialogTool::Kirigami],
+        Ok("kdialog") => vec![DialogTool::Kdialog],
+        Ok("zenity") => vec![DialogTool::Zenity],
+        _ if kde_session() => vec![
+            DialogTool::Kirigami,
+            DialogTool::Kdialog,
+            DialogTool::Zenity,
+        ],
+        _ => vec![DialogTool::Zenity, DialogTool::Kdialog],
+    }
+}
+
+/// `--debug` 里显示弹框候选（逗号分隔）。
+pub fn dialog_chain() -> String {
+    dialog_tools()
+        .iter()
+        .map(|tool| tool.name())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// 会话看起来是 KDE 吗（挑弹框用；看环境变量就够了，不猜别的）。
+fn kde_session() -> bool {
+    [
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+        "DESKTOP_SESSION",
+        "KDE_FULL_SESSION",
+    ]
+    .iter()
+    .filter_map(env::var_os)
+    .any(|value| {
+        let value = value.to_string_lossy().to_ascii_lowercase();
+        value.contains("kde") || value.contains("plasma")
+    })
+}
+
+/// 弹框上要用的几句话（都来自 `locales/*.yml`）。
+struct DialogText<'a> {
+    title: &'a str,
+    question: &'a str,
+    run: &'a str,
+    decline: &'a str,
+    dont_ask_again: &'a str,
+}
+
 /// 图形询问：一个“不再询问”复选框加上运行/不运行两个按钮。
 fn ask_dialog(entry: &QemuEntry, target: &Path, info: &crate::elf::ElfInfo) -> Option<AskOutcome> {
-    let title = t!("dialog-title");
-    let run_label = t!("run-label");
-    let decline_label = t!("decline-label");
-    let dont_ask_again = t!("dont-ask-again");
     let question = format!(
         "{}\n\n{}",
         qemu_question(target, info),
         t!("run-with-prompt", entry = entry.name)
     );
+    let title = t!("dialog-title");
+    let run_label = t!("run-label");
+    let decline_label = t!("decline-label");
+    let dont_ask_again = t!("dont-ask-again");
+    let text = DialogText {
+        title: &title,
+        question: &question,
+        run: &run_label,
+        decline: &decline_label,
+        dont_ask_again: &dont_ask_again,
+    };
 
-    // zenity 的问题对话框没有复选框，用只有一个条目的复选列表代替
-    // （复选列表至少要有两列：第一列放复选框，第二列才是条目文字）。
-    let zenity = Command::new("zenity")
+    for tool in dialog_tools() {
+        let answer = match tool {
+            DialogTool::Kirigami => ask_kirigami(&text),
+            DialogTool::Kdialog => ask_kdialog(&text),
+            DialogTool::Zenity => ask_zenity(&text),
+        };
+        if answer.is_some() {
+            return answer;
+        }
+    }
+    None
+}
+
+/// 自带的 Kirigami 弹框：Qt6 的 qml 运行时跑 `dialog.qml`。
+///
+/// 找不到运行时 / QML 文件，或者 qml 自己出错（退出码不是我们的约定）= 没答案，
+/// 交给下一个候选。
+fn ask_kirigami(text: &DialogText) -> Option<AskOutcome> {
+    let runtime = qml_runtime()?;
+    let file = qml_file();
+    if !file.is_file() {
+        return None;
+    }
+    let output = Command::new(runtime)
+        .arg(&file)
+        // qml 运行时的用法是 `qml [选项] <文件> [-- 参数…]`：只有 `--` 之后的
+        // 参数才会原样传到 Qt.application.arguments（否则会被当成要加载的 QML
+        // 文件）。
+        .arg("--")
+        .args([
+            "--title",
+            text.title,
+            "--text",
+            text.question,
+            "--checkbox",
+            text.dont_ask_again,
+            "--ok",
+            text.run,
+            "--cancel",
+            text.decline,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    match output.status.code() {
+        Some(QML_RUN) => Some(AskOutcome {
+            run: true,
+            remember: false,
+        }),
+        Some(QML_RUN_REMEMBER) => Some(AskOutcome {
+            run: true,
+            remember: true,
+        }),
+        Some(QML_DECLINE) => Some(AskOutcome {
+            run: false,
+            remember: false,
+        }),
+        _ => None,
+    }
+}
+
+/// Qt6 的 QML 运行时。Qt5 的跑不了这个 QML（它要带版本的 import），所以用
+/// `--version` 把候选筛一遍；`AOSC_EXEC_GUARD_QML` 可以指到别处（测试用）。
+fn qml_runtime() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("AOSC_EXEC_GUARD_QML") {
+        return Some(PathBuf::from(path));
+    }
+    ["/usr/lib/qt6/bin/qml", "/usr/bin/qml6", "/usr/bin/qml"]
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| {
+            path.is_file()
+                && Command::new(path)
+                    .arg("--version")
+                    .output()
+                    .map(|out| String::from_utf8_lossy(&out.stdout).contains("Qml Runtime 6"))
+                    .unwrap_or(false)
+        })
+}
+
+/// 弹框 QML 的位置；`AOSC_EXEC_GUARD_QML_FILE` 可以指到别处（测试、或者自己
+/// 改过的框）。
+fn qml_file() -> PathBuf {
+    env::var_os("AOSC_EXEC_GUARD_QML_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/usr/share/aosc-exec-guard/dialog.qml"))
+}
+
+/// zenity（GTK 那边）：问题对话框没有复选框，用只有一个条目的复选列表代替
+/// （复选列表至少要有两列：第一列放复选框，第二列才是条目文字）。
+fn ask_zenity(text: &DialogText) -> Option<AskOutcome> {
+    let output = Command::new("zenity")
         .args([
             "--list",
             "--checklist",
             "--hide-header",
-            &format!("--title={title}"),
+            &format!("--title={}", text.title),
             "--column= ",
-            &format!("--column={dont_ask_again}"),
+            &format!("--column={}", text.dont_ask_again),
             "--print-column=2",
-            &format!("--ok-label={run_label}"),
-            &format!("--cancel-label={decline_label}"),
-            &format!("--text={}", escape_markup(&question)),
+            &format!("--ok-label={}", text.run),
+            &format!("--cancel-label={}", text.decline),
+            &format!("--text={}", escape_markup(text.question)),
             "FALSE",
-            &dont_ask_again,
+            text.dont_ask_again,
         ])
         .stdin(Stdio::null())
-        .output();
-    if let Ok(output) = zenity
-        && let Some(outcome) = ask_outcome(&output)
-    {
-        return Some(outcome);
-    }
+        .output()
+        .ok()?;
+    ask_outcome(&output)
+}
 
-    // kdialog 的复选列表同理（它的消息框有复选框，但不能自定义按钮文字）。
-    let kdialog = Command::new("kdialog")
+/// kdialog：复选列表同理（它的消息框有复选框，但不能自定义按钮文字）。
+fn ask_kdialog(text: &DialogText) -> Option<AskOutcome> {
+    let output = Command::new("kdialog")
         .args([
-            &format!("--title={title}"),
-            &format!("--ok-label={run_label}"),
-            &format!("--cancel-label={decline_label}"),
+            &format!("--title={}", text.title),
+            &format!("--ok-label={}", text.run),
+            &format!("--cancel-label={}", text.decline),
             "--checklist",
-            &question,
+            text.question,
             "1",
-            &dont_ask_again,
+            text.dont_ask_again,
             "off",
         ])
         .stdin(Stdio::null())
-        .output();
-    if let Ok(output) = kdialog
-        && let Some(outcome) = ask_outcome(&output)
-    {
-        return Some(outcome);
-    }
-
-    None
+        .output()
+        .ok()?;
+    ask_outcome(&output)
 }
 
 /// 0 = 按了“运行”（勾选框时 zenity 打印条目文字、kdialog 打印条目编号），

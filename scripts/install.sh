@@ -39,6 +39,8 @@ done
 
 BIN_DST=$PREFIX/bin/aosc-exec-guard
 CONF_DST=$PREFIX/lib/binfmt.d/zz-aosc-exec-guard.conf
+QML_SRC=$PWD/data/dialog.qml
+QML_DST=$PREFIX/share/aosc-exec-guard/dialog.qml
 BM=/proc/sys/fs/binfmt_misc
 
 # uname -m / HOST_ARCH 的写法 → 我们的条目名（同 qemu 的 qemu_normalize）。
@@ -193,7 +195,7 @@ if [ "$UNINSTALL" = yes ]; then
   if [ -e "$CONF_DST" ]; then
     cp "$CONF_DST" "$undo_list"
   fi
-  rm -f "$BIN_DST" "$CONF_DST" "$CONF_DST.disabled"
+  rm -f "$BIN_DST" "$CONF_DST" "$CONF_DST.disabled" "$QML_DST"
   if [ "$PREFIX_GIVEN" = no ]; then
     restart_binfmt
     undo_entries "$undo_list"   # 保险：万一服务没把条目注销掉
@@ -220,11 +222,13 @@ fi
 
 install -Dm755 "$BIN_SRC" "$BIN_DST"
 install -Dm644 "$tmp_conf" "$CONF_DST"
+# 自带的 Kirigami 弹框（KDE 会话里 guard 优先用它；没装 Qt6/Kirigami 就往下退）
+install -Dm644 "$QML_SRC" "$QML_DST"
 # 装/重装即清除上一轮 --handover 留下的停用标记（重新启用 guard）
 rm -f "$CONF_DST.disabled"
-printf '已写入 %s\n已写入 %s（%s 条规则，已去掉 %s 家族的规则）\n' \
+printf '已写入 %s\n已写入 %s（%s 条规则，已去掉 %s 家族的规则）\n已写入 %s\n' \
   "$BIN_DST" "$CONF_DST" \
-  "$(grep -c '^:' "$CONF_DST")" "$HOST_FAMILY"
+  "$(grep -c '^:' "$CONF_DST")" "$HOST_FAMILY" "$QML_DST"
 
 if [ "$PREFIX_GIVEN" = yes ]; then
   echo '（--prefix 模式：没有碰内核；装到目标系统时请在那里执行 scripts/install.sh）'

@@ -33,7 +33,7 @@
   **装不到本机架构的规则上去**（会劫持解释器自身 → `ELOOP` → 全系统起不了新程序），但不用手工去删：`just install`（底层是 `scripts/install.sh`）按 qemu 的 `qemu-binfmt-conf.sh` **同一套“家族”表**过滤（amd64 上删 i386+x86_64、aarch64 上删 arm+aarch64、mips64 上删 mips 一族…），装到 `/usr` 后还会拿 `/usr/bin/true` 做 exec 冒烟测试，万一过滤漏了它会用内建命令立刻撤销并报错。所以**一份 conf 就够，不需要为每个目标架构各存一份**；打成包时用 `just install <目录>` 或直接 `scripts/install.sh --prefix <目录>`（交叉打包再加目标架构参数，见 `just --list` / `scripts/install.sh --help`）。
 - `aosc-exec-guard` 的工作：
   - 读 ELF 头（只读前 20 字节），区分三种情况：外来架构 / 本机架构（本不该被条目命中，防呆）/ 根本不是 ELF；
-  - 输出解释到 stderr；如果是从图形会话启动（有 `DISPLAY`/`WAYLAND_DISPLAY`，且 stdout/stderr 都不是终端，也不是 systemd 服务），再调 `zenity`/`kdialog` 弹框；
+  - 输出解释到 stderr；如果是从图形会话启动（有 `DISPLAY`/`WAYLAND_DISPLAY`，且 stdout/stderr 都不是终端，也不是 systemd 服务），再弹框（KDE 会话里优先用自带的 Kirigami 框，其次是 kdialog / zenity，见下文“图形弹框”）；
   - 退出码 126，保持 shell 对"找到但无法执行"的惯例。
 - 模拟器询问与转发：如果目标架构有**已启用**的 qemu-user binfmt 条目（解释器文件还在），guard 按 `--qemu` / `AOSC_EXEC_GUARD_QEMU` / 用户配置分三种处理：
   - `ask`（默认）：图形会话弹询问框（复选框"不再询问"），终端里给一个上下键菜单（运行一次 / 不运行 / 总是运行，回车确认、`q` 退出）；两种界面都拿不到时（服务、无终端、无对话框）保持老行为——直接交给模拟器；**chroot / 容器里不问，见下文“让位”**；
@@ -43,6 +43,27 @@
 - 开关：`--no-dialog` / `--debug` / `--qemu=<ask|always|never>`（分别等同 `AOSC_EXEC_GUARD_NO_DIALOG=1` / `AOSC_EXEC_GUARD_DEBUG=1` / `AOSC_EXEC_GUARD_QEMU=…`）。内核调用时命令行只能是"程序路径 + 原程序参数"，没法给 guard 传选项，所以环境变量是内核路径下唯一可用的开关；命令行选项只服务于手动运行。`--qemu` 的优先级：命令行 > 环境变量 > 用户配置（`~/.config/aosc-exec-guard.conf`）> 系统默认（`/etc/aosc-exec-guard.conf`）。手动再记一个：`--handover[=on|off]`（需要 root，把位置让给内核的 qemu 条目，见下文；脚本里加 `--yes`）。
 - 命令行解析用 clap：`aosc-exec-guard [选项] <程序路径> [参数…]`——路径之后的参数一律原样保留，`--debug`、`--help` 之类不会被 guard 抢去解析（它们本来就属于原程序）。
 
+## 图形弹框
+
+弹框只在**宿主机的图形会话**里会出现（`mode=Dialog`）；chroot / 容器里没有 session socket，压根走不到这条路，跟静态解释器的性质不冲突。候选按会话挑：
+
+| 会话 | 顺序 |
+| --- | --- |
+| KDE / Plasma（`XDG_CURRENT_DESKTOP`、`KDE_FULL_SESSION` 等含 kde/plasma） | **Kirigami（`data/dialog.qml`）** → kdialog → zenity |
+| 其它桌面 | zenity → kdialog（不把 KDE 味道的框摆到 GNOME 上） |
+
+Kirigami 那个框不是编出来的：它是 `data/dialog.qml`（装到 `/usr/share/aosc-exec-guard/`） + **Qt6 的 qml 运行时**（`/usr/lib/qt6/bin/qml`，包 `qt-6`）+ `kirigami` 的 QML 模块，guard 只负责 exec 它。这样做的好处：
+
+- **guard 自己还是静态单文件**：弹框本来就是子进程（以前是 zenity/kdialog），动态链接的 Qt 只影响这个子进程，而它只在有图形会话的宿主机上跑；找不到（或 QML 跑不起来，比如 qml 退出码不是约定）就往下退，最不济落到终端菜单/只解释。
+- Qt6 的 QML 运行时**不是**标准 PATH 里的 `qml`（那台机器上是 Qt5 的，跑不了 Qt6 的 QML），所以 guard 会探测 `/usr/lib/qt6/bin/qml` / `/usr/bin/qml6`，并用 `--version` 确认真的是 6 才用。
+- 文案全在 guard 的 `locales/*.yml` 里，用 `--title/--text/--checkbox/--ok/--cancel` 传给 QML（`qml` 运行时的用法是 `qml [选项] <文件> [-- 参数…]`，参数必须在 `--` 之后），QML 里不存字符串，也就没有第二份 i18n。
+- 结果用退出码说：**10 = 运行、12 = 运行并记住、11 = 不运行**（0/1/2 是 qml 运行时自己的码，所以避开）；QML 里还带一个 `--test-answer=run|remember|decline` 给测试用（不弹窗直接返回）。
+- 框做成**普通对话框窗口**（`flags: Qt.Dialog`）：KWin 画 Breeze 标题栏，和 kdialog 一个观感，不用透明窗口/合成器，也不像 `Kirigami.Dialog`（Popup）那样被宿主窗口尺寸夹住、铺满整个屏幕。踩过的坑：`ApplicationWindow` 不显式写 `visible: true` 就根本不出窗口，而 offscreen 冒烟（只看退出码）看不出来——所以另有一条 `just dialog-smoke`：真会话里把框弹出来、用 xdotool 按回车验退出码，没装 Qt6/xdotool 或没有 `DISPLAY` 就自动跳过。
+
+开关（测试/自定义用）：`AOSC_EXEC_GUARD_DIALOG=<qml|kdialog|zenity>` 钉死用哪个，`AOSC_EXEC_GUARD_QML=<运行时路径>`、`AOSC_EXEC_GUARD_QML_FILE=<qml 文件>` 换个运行时/换自己的框；`--debug` 会打印 `dialog=qml,kdialog,zenity` 这样的候选链，排查“为什么没弹框”先看它。
+
+打包上别让 guard 硬依赖 Qt：`qt-6` + `kirigami` 走 Recommends/Suggests，或者单独一个子包丢给 KDE 桌面 meta；没装它们的机器会自动用 kdialog/zenity，服务器上不装图形工具也能跑。`just test` 里用 stub 运行时验了“KDE 会话优先 Kirigami / 参数与退出码 / 坏了退回 zenity / 非 KDE 不碰它 / `AOSC_EXEC_GUARD_DIALOG` 钉死工具”，另外还有一条真 QML + 真运行时的 offscreen 冒烟（没装 Qt6 就跳过；它只看退出码，窗框到底出没出得来得 `just dialog-smoke`）。
+
 ## 目录
 
 ```
@@ -50,12 +71,13 @@ src/main.rs                  CLI 解析（clap）+ 主流程
 src/elf.rs                   ELF 解析、“能不能在本机跑”的判定与解释文案
 src/qemu.rs                  模拟器（binfmt_misc 注册表）的发现与转发
 src/handover.rs              让位给内核的 qemu 条目（--handover）
-src/prompt.rs                询问：zenity/kdialog 弹框、dialoguer 终端菜单、出错弹框
+src/prompt.rs                询问：图形弹框（Kirigami/kdialog/zenity）、dialoguer 终端菜单、出错弹框
 src/platform.rs              环境判定：终端 / 图形 / systemd 服务 / chroot
 src/config.rs                设置：--qemu、AOSC_EXEC_GUARD_QEMU、/etc 与用户配置的优先级与读写
 src/i18n.rs                  语言判定（文案在 locales/*.yml，由 rust-i18n 编译期嵌入）
 locales/en.yml               英文文案（基准语言：缺翻译回退到它）
 locales/zh-CN.yml            中文文案
+data/dialog.qml              KDE 会话里用的 Kirigami 弹框（Qt6 的 qml 运行时跑，见下文）
 justfile                     开发/测试/安装入口（just / just test / sudo just install …）
 rust-toolchain.toml         rustup：stable + 各主架构的 musl 标准库（静态构建用）
 scripts/install.sh           安装/卸载脚本（just install 就是调它；打包可直接调，不必依赖 just）
@@ -70,6 +92,7 @@ data/binfmt.d/zz-aosc-exec-guard.conf.in  规则模板（全集，22 条，抄�
 $ just                    # 列出全部配方
 $ just build              # 静态构建（唯一构建，见下文“构建”）
 $ just test               # 单测 + 直接调用 + stub 弹框/仿真器 + installer
+$ just dialog-smoke       # 真会话里弹一次真框（手动看观感/验窗口能显示）
 ```
 
 装到系统（需要 root；会重启 systemd-binfmt 并做 exec 冒烟测试，失败自动撤销）：

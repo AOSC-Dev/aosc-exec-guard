@@ -187,10 +187,12 @@ test: build
     just install "$TMP/pkg" > /dev/null || fail 'installer 在本机架构上失败'
     conf=$TMP/pkg/lib/binfmt.d/zz-aosc-exec-guard.conf
     echo "本机 $(uname -m)：过滤后剩 $(grep -c '^:' "$conf") 条规则"
+    [ -f "$TMP/pkg/share/aosc-exec-guard/dialog.qml" ] || fail 'installer 没装 Kirigami 弹框的 QML'
     # 卸载
     just uninstall "$TMP/pkg" > /dev/null || fail 'uninstall 失败'
     [ ! -e "$conf" ] || fail 'uninstall 没删 conf'
     [ ! -e "$TMP/pkg/bin/aosc-exec-guard" ] || fail 'uninstall 没删二进制'
+    [ ! -e "$TMP/pkg/share/aosc-exec-guard/dialog.qml" ] || fail 'uninstall 没删 QML'
 
     step 'stubs: fake binfmt dir + stub qemu + stub zenity'
     mkdir -p "$TMP/bin" "$TMP/binfmt"
@@ -220,7 +222,9 @@ test: build
 
     step 'dialog branch (stub zenity, no window is opened)'
     set +e
-    env -u INVOCATION_ID -u XDG_CONFIG_HOME DISPLAY=:99 AOSC_GUARD_TEST_LOG="$LOG" AOSC_EXEC_GUARD_DEBUG=1 \
+    env -u INVOCATION_ID -u XDG_CONFIG_HOME -u XDG_CURRENT_DESKTOP -u XDG_SESSION_DESKTOP \
+      -u DESKTOP_SESSION -u KDE_FULL_SESSION DISPLAY=:99 AOSC_GUARD_TEST_LOG="$LOG" \
+      AOSC_EXEC_GUARD_DEBUG=1 \
       HOME="$PWD/$TMP/home" AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/binfmt-empty" AOSC_EXEC_GUARD_LANG=zh_CN \
       PATH="$TMP/bin:$PATH" "$GUARD" "$TMP/aarch64.elf" </dev/null > "$TMP/guard.out" 2> "$TMP/guard.err"
     code=$?
@@ -229,6 +233,7 @@ test: build
     [ -s "$LOG" ] || fail 'stub zenity was never called'
     grep -q 'aarch64' "$LOG" || fail 'dialog text should mention aarch64'
     grep -q 'mode=Dialog' "$TMP/guard.err" || fail 'decision should be Dialog in this setup'
+    grep -q 'dialog=zenity' "$TMP/guard.err" || fail '非 KDE 会话应当先试 zenity'
     echo 'stub zenity received:'
     sed 's/^/  /' "$LOG"
 
@@ -304,7 +309,8 @@ test: build
     run_gui_ask() {
       : > "$LOG"
       set +e
-      env -u INVOCATION_ID -u XDG_CONFIG_HOME DISPLAY=:99 AOSC_GUARD_TEST_LOG="$LOG" \
+      env -u INVOCATION_ID -u XDG_CONFIG_HOME -u XDG_CURRENT_DESKTOP -u XDG_SESSION_DESKTOP \
+        -u DESKTOP_SESSION -u KDE_FULL_SESSION DISPLAY=:99 AOSC_GUARD_TEST_LOG="$LOG" \
         HOME="$PWD/$TMP/home" AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/binfmt" AOSC_EXEC_GUARD_QEMU=ask \
         AOSC_EXEC_GUARD_LANG=zh_CN \
         PATH="$TMP/bin:$PATH" "$@" "$GUARD" "$TMP/aarch64.elf" </dev/null > "$TMP/g.out" 2> "$TMP/g.err"
@@ -324,6 +330,105 @@ test: build
     run_gui_ask env AOSC_GUARD_TEST_ZENITY_CANCEL=1
     [ "$code" -eq 126 ] || fail "cancelling should explain and exit 126, got $code"
     grep -q -- '--error' "$LOG" || fail 'declining should end in the explanation dialog'
+
+    step 'qemu: Kirigami 弹框（KDE 会话下优先，stub 运行时验参数/结果/回退）'
+    cat > "$TMP/bin/qml-stub" <<'STUB'
+    #!/usr/bin/env bash
+    printf '%s\n' "$@" >> "$AOSC_GUARD_TEST_QML_LOG"
+    case "${AOSC_GUARD_TEST_QML_ANSWER:-run}" in
+      run) exit 10 ;;
+      remember) exit 12 ;;
+      decline) exit 11 ;;
+      *) exit 2 ;;  # qml 运行时自己出错时的码
+    esac
+    STUB
+    chmod +x "$TMP/bin/qml-stub"
+    QLOG=$TMP/qml.log
+    rm -f "$PWD/$TMP/home/.config/aosc-exec-guard.conf"
+    run_kirigami() { # $1 = qml 的答案（run/remember/decline/broken）
+      : > "$QLOG"
+      : > "$LOG"
+      set +e
+      out=$(env -u INVOCATION_ID -u XDG_CONFIG_HOME DISPLAY=:99 \
+        AOSC_GUARD_TEST_LOG="$LOG" AOSC_GUARD_TEST_QML_LOG="$QLOG" AOSC_GUARD_TEST_QML_ANSWER="$1" \
+        XDG_CURRENT_DESKTOP=KDE AOSC_EXEC_GUARD_QML="$PWD/$TMP/bin/qml-stub" \
+        AOSC_EXEC_GUARD_QML_FILE="$PWD/data/dialog.qml" AOSC_EXEC_GUARD_QEMU=ask \
+        HOME="$PWD/$TMP/home" AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/binfmt" \
+        AOSC_EXEC_GUARD_LANG=zh_CN PATH="$TMP/bin:$PATH" \
+        "$GUARD" "$TMP/aarch64.elf" 2>&1)
+      code=$?
+      set -e
+      printf 'qml-answer=%s exit=%s\n' "$1" "$code"
+    }
+
+    run_kirigami run
+    [ "$code" -eq 42 ] || fail "qml 回“运行”就该交给 stub qemu（42），实际 $code"
+    grep -qx -- '--' "$QLOG" || fail '参数要在 `--` 之后传给 qml 运行时（否则会被当成 QML 文件）'
+    grep -q 'aarch64' "$QLOG" || fail 'QML 弹框应该收到问题正文'
+    grep -q '不再询问' "$QLOG" || fail 'QML 弹框应该收到本地化的复选框文字'
+    grep -q '运行' "$QLOG" || fail 'QML 弹框应该收到按钮文字'
+    [ ! -s "$LOG" ] || fail 'KDE 会话里该先试 Kirigami 弹框，不该轮到 zenity'
+
+    run_kirigami remember
+    [ "$code" -eq 42 ] || fail 'qml 回“运行并记住”也该交给 stub qemu'
+    grep -q 'qemu = always' "$PWD/$TMP/home/.config/aosc-exec-guard.conf" \
+      || fail 'qml 回“运行并记住”应该写进配置'
+    rm -f "$PWD/$TMP/home/.config/aosc-exec-guard.conf"
+
+    run_kirigami decline
+    [ "$code" -eq 126 ] || fail 'qml 回“不运行”应该只解释、退 126'
+
+    run_kirigami broken   # 比如 QML 加载失败：qml 退出码不是约定，应该退回 zenity
+    [ "$code" -eq 42 ] || fail 'qml 坏掉时应该退回 zenity 并交给 stub qemu'
+    [ -s "$LOG" ] || fail 'qml 出问题时应该退回 zenity'
+
+    step 'qemu: 非 KDE 会话用 zenity，不碰 Kirigami 弹框'
+    : > "$LOG"; : > "$QLOG"
+    set +e
+    out=$(env -u INVOCATION_ID -u XDG_CONFIG_HOME -u XDG_CURRENT_DESKTOP -u XDG_SESSION_DESKTOP \
+      -u DESKTOP_SESSION -u KDE_FULL_SESSION DISPLAY=:99 \
+      AOSC_GUARD_TEST_LOG="$LOG" AOSC_GUARD_TEST_QML_LOG="$QLOG" \
+      AOSC_EXEC_GUARD_QML="$PWD/$TMP/bin/qml-stub" AOSC_EXEC_GUARD_QML_FILE="$PWD/data/dialog.qml" \
+      AOSC_EXEC_GUARD_QEMU=ask HOME="$PWD/$TMP/home" AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/binfmt" \
+      AOSC_EXEC_GUARD_LANG=zh_CN PATH="$TMP/bin:$PATH" "$GUARD" "$TMP/aarch64.elf" 2>&1)
+    code=$?
+    set -e
+    [ "$code" -eq 42 ] || fail "zenity 回“运行”就该交给 stub qemu，实际 $code"
+    [ -s "$LOG" ] || fail '非 KDE 会话应该用 zenity'
+    [ ! -s "$QLOG" ] || fail '非 KDE 会话不该动 Kirigami 弹框'
+
+    step 'qemu: AOSC_EXEC_GUARD_DIALOG 可以钉死弹框工具'
+    : > "$LOG"; : > "$QLOG"
+    set +e
+    out=$(env -u INVOCATION_ID -u XDG_CONFIG_HOME DISPLAY=:99 \
+      AOSC_GUARD_TEST_LOG="$LOG" AOSC_GUARD_TEST_QML_LOG="$QLOG" \
+      XDG_CURRENT_DESKTOP=KDE AOSC_EXEC_GUARD_DIALOG=zenity \
+      AOSC_EXEC_GUARD_QML="$PWD/$TMP/bin/qml-stub" AOSC_EXEC_GUARD_QML_FILE="$PWD/data/dialog.qml" \
+      AOSC_EXEC_GUARD_QEMU=ask HOME="$PWD/$TMP/home" AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/binfmt" \
+      AOSC_EXEC_GUARD_LANG=zh_CN PATH="$TMP/bin:$PATH" "$GUARD" "$TMP/aarch64.elf" 2>&1)
+    code=$?
+    set -e
+    [ "$code" -eq 42 ] || fail "钉死 zenity 后应该走 zenity，实际 $code"
+    [ -s "$LOG" ] || fail 'AOSC_EXEC_GUARD_DIALOG=zenity 应该用 zenity'
+    [ ! -s "$QLOG" ] || fail 'AOSC_EXEC_GUARD_DIALOG=zenity 时不该试 Kirigami 弹框'
+
+    step 'Kirigami 弹框：真 QML + 真 qml 运行时（offscreen，不弹窗）'
+    QML_RUNTIME=/usr/lib/qt6/bin/qml
+    if [ -x "$QML_RUNTIME" ]; then
+      for pair in run:10 remember:12 decline:11; do
+        set +e
+        QT_QPA_PLATFORM=offscreen "$QML_RUNTIME" "$PWD/data/dialog.qml" -- \
+          --title 测试 --text 正文 --checkbox 不再询问 --ok 运行 --cancel 不运行 \
+          --test-answer "${pair%%:*}" >/dev/null 2>&1
+        code=$?
+        set -e
+        [ "$code" -eq "${pair##*:}" ] \
+          || fail "真 QML 的 ${pair%%:*} 应该退 ${pair##*:}，实际 $code"
+      done
+      echo '=> 真 QML 的退出码对得上（10/12/11）'
+    else
+      echo "没装 Qt6 的 qml 运行时（$QML_RUNTIME），跳过真 QML 检查"
+    fi
 
     step 'qemu: saved answer wins, --qemu overrides it'
     printf 'qemu = always\n' > "$PWD/$TMP/home/.config/aosc-exec-guard.conf"
@@ -495,6 +600,50 @@ test: build
 
     step 'local checks passed'
     echo 'next: sudo just kernel-test'
+
+# 真会话里的弹框冒烟：真的把窗口弹出来看一眼（会短暂闪窗，不属于 just test）。
+# 存在的意义：offscreen 冒烟只看退出码，看不出「窗口根本没成形」这类毛病
+# （ApplicationWindow 忘了 visible: true 就是这样：offscreen 下照样过）。
+dialog-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    step() { printf '\n== %s ==\n' "$*"; }
+    fail() { printf '!! %s\n' "$*" >&2; exit 1; }
+
+    QML_RUNTIME=/usr/lib/qt6/bin/qml
+    [ -x "$QML_RUNTIME" ] || { echo "没装 Qt6 的 qml 运行时（$QML_RUNTIME），跳过"; exit 0; }
+    [ -n "${DISPLAY:-}" ] || { echo '没有 DISPLAY，跳过'; exit 0; }
+    command -v xdotool > /dev/null \
+      || { echo '没装 xdotool（驱动不了窗口），跳过'; exit 0; }
+
+    step '真弹窗冒烟：窗口得真的显示出来，回车 = 运行（退出码 10）'
+    "$QML_RUNTIME" "$PWD/data/dialog.qml" -- \
+      --title 'aosc-exec-guard 冒烟测试' --text '冒烟测试：按回车（= 运行）或 Esc（= 不运行）。' \
+      --checkbox '不再询问' --ok '运行' --cancel '不运行' > /tmp/aosc-qml-smoke.log 2>&1 &
+    pid=$!
+    win=
+    for _ in $(seq 1 20); do
+      win=$(xdotool search --pid "$pid" 2>/dev/null | head -1 || true)
+      [ -n "$win" ] && break
+      sleep 0.25
+    done
+    if [ -z "$win" ]; then
+      kill "$pid" 2>/dev/null || true
+      echo 'qml 日志：'; cat /tmp/aosc-qml-smoke.log
+      fail 'QML 跑着，但 X 上没有窗口（忘了 visible: true？）'
+    fi
+    echo "=> 窗口出来了（hwnd $win）"
+    w=$(xdotool getwindowgeometry --shell "$win" | sed -n 's/^WIDTH=//p')
+    h=$(xdotool getwindowgeometry --shell "$win" | sed -n 's/^HEIGHT=//p')
+    echo "   尺寸 ${w}x${h}（HiDPI 下是物理像素，逻辑尺寸见 dialog.qml 的 width/height）"
+    xdotool windowactivate --sync "$win" 2>/dev/null || true
+    xdotool key --clearmodifiers Return
+    set +e
+    wait "$pid"
+    code=$?
+    set -e
+    [ "$code" -eq 10 ] || fail "回车后应退 10（运行），实际 $code"
+    echo '=> 真弹窗冒烟通过'
 
 # 内核端到端测试（需要 root）：注册/优先级/chroot/qemu 转发/自动清理
 kernel-test:
