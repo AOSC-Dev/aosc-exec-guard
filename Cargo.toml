@@ -1,0 +1,12 @@
+[package]
+name = "aosc-exec-guard"
+version = "0.1.0"
+edition = "2024"
+description = "binfmt_misc guard PoC: explain why an executable cannot run"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+
+[profile.release]
+strip = true
+lto = true
