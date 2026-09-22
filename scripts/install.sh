@@ -16,7 +16,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CONF_SRC=$PWD/data/binfmt.d/zz-aosc-exec-guard.conf.in
-BIN_SRC=$PWD/target/release/aosc-exec-guard
+BIN_SRC=$PWD/target/static/aosc-exec-guard
 
 PREFIX=/usr
 PREFIX_GIVEN=no
@@ -204,7 +204,7 @@ if [ "$UNINSTALL" = yes ]; then
 fi
 
 [ -x "$BIN_SRC" ] || {
-  echo "找不到 $BIN_SRC；先 cargo build --release（或 scripts/test.sh）。" >&2
+  echo "找不到 $BIN_SRC；先 just build（静态构建，见 README 的“构建”）。" >&2
   exit 1
 }
 

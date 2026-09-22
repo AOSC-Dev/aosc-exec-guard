@@ -1,7 +1,7 @@
 # aosc-exec-guard：开发 / 测试 / 安装入口（原先 scripts/*.sh 的内容都在这里）
 #
 #   just                            # 列出配方
-#   just build                      # cargo build --release
+#   just build                      # 静态构建（有 musl target 用 musl，否则 glibc 静态）
 #   just test                       # 本地全套检查（无 root）
 #   sudo just kernel-test           # 内核端到端（注册 binfmt 条目，结束自动清理）
 #   sudo just systemd-install-test  # 真实安装路径（/usr/lib/binfmt.d + systemd-binfmt）
@@ -17,19 +17,28 @@ set positional-arguments
 default:
     @just --list
 
-# 构建 release 二进制（conf 里的解释器 /usr/bin/aosc-exec-guard 就是它）
+# 构建：唯一的 release 二进制，全静态（要拷进空 rootfs / 容器 里直接用，不能带 libc）。
+# 机器上有 musl target 就用 musl；没有就退回 glibc + crt-static（也是静态）。
+# 产物统一在 target/static/aosc-exec-guard——conf 里的 /usr/bin/aosc-exec-guard 就是它。
 build:
-    cargo build --release
-
-# 静态构建（拷进 chroot / 容器用，省得连库一起拷；宿主安装还是用 just build）
-build-static:
     #!/usr/bin/env bash
     set -euo pipefail
-    # 必须带 --target：不带的话 RUSTFLAGS 会连 proc-macro（clap_derive）一起影响，
-    # 它就编不出来了。
-    target=$(rustc -vV | awk '/^host:/ {print $2}')
-    RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target "$target"
-    install -Dm755 "target/$target/release/aosc-exec-guard" target/static/aosc-exec-guard
+    host=$(rustc -vV | awk '/^host:/ {print $2}')
+    case "$host" in
+      *-musl) triple=$host ;;
+      *) triple=${host%-gnu}-musl ;;   # x86_64-unknown-linux-gnu → …-linux-musl
+    esac
+    if rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
+      cargo build --release --target "$triple"
+      bin="target/$triple/release/aosc-exec-guard"
+      echo "（musl 静态构建：$triple）"
+    else
+      # 必须带 --target：不带的话 RUSTFLAGS 会连 proc-macro（clap_derive）一起影响，编不出来。
+      RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target "$host"
+      bin="target/$host/release/aosc-exec-guard"
+      echo "（glibc 静态构建；想用 musl：rustup target add $triple）"
+    fi
+    install -Dm755 "$bin" target/static/aosc-exec-guard
     file target/static/aosc-exec-guard
 
 # 代码检查：rustfmt + clippy
@@ -51,7 +60,7 @@ test: build
     step 'cargo test'
     cargo test --quiet
 
-    GUARD=$PWD/target/release/aosc-exec-guard
+    GUARD=$PWD/target/static/aosc-exec-guard
 
     step 'fabricate test files'
     # Minimal AArch64 ELF header (e_type=ET_EXEC, e_machine=0xb7): enough for
@@ -473,7 +482,7 @@ kernel-test:
       exit 1
     fi
 
-    GUARD=$PWD/target/release/aosc-exec-guard
+    GUARD=$PWD/target/static/aosc-exec-guard
     [ -x "$GUARD" ] || { echo "找不到 $GUARD；先跑 just build" >&2; exit 1; }
 
     TMP=tests/tmp
@@ -512,7 +521,7 @@ kernel-test:
         umount "$CHR/proc" 2>/dev/null
         rm -rf "$CHR"
       fi
-      [ -n "${CHR2:-}" ] && rm -rf "$CHR2"
+      [ -n "${CHR3:-}" ] && rm -rf "$CHR3"
       [ -e "$ENTRY" ] && echo -1 > "$ENTRY"
       if [ -e "$QEMU_ENTRY" ]; then
         if [ "$QEMU_WAS_ENABLED" = yes ]; then echo 1 > "$QEMU_ENTRY"; else echo 0 > "$QEMU_ENTRY"; fi
@@ -579,41 +588,26 @@ kernel-test:
       [ "$code" -eq 126 ] || fail "exit code should be 126, got $code"
     fi
 
-    step 'chroot：宿主条目照样命中；F 给出解释器文件，但动态解释器还要 rootfs 里有 ld.so'
+    step 'chroot：宿主条目照样命中；静态 guard + F —— 空 rootfs 里零拷贝直接能解释'
     CHR=$PWD/$TMP/chroot
     rm -rf "${CHR:?}"
-    mkdir -p "$CHR/usr/bin" "$CHR/proc"
+    mkdir -p "$CHR/proc"
     cp "$TMP/aarch64.elf" "$CHR/prog"
     chmod +x "$CHR/prog"
 
     # 条目带 F（fix binary）：解释器文件在注册时就打开，exec 时直接用宿主机上
-    # 的那一份。但它是动态链接的：ld.so/库仍按 rootfs 的根找 → 空 rootfs 里以
-    # ENOENT 收场（shell 报“No such file or directory”，不是“Exec format error”）。
-    set +e
-    out=$(chroot "$CHR" /prog 2>&1)
-    code=$?
-    set -e
-    printf '%s\nexit=%s\n' "$out" "$code"
-    case "$out" in
-      *'Exec format error'*) fail 'chroot 里条目竟没命中？' ;;
-      *'No such file'*) echo '=> 条目命中了；差的是动态解释器的 ld.so/库' ;;
-      *) fail 'chroot 行为出乎意料' ;;
-    esac
-
-    # 只把库（和 ld.so）拷进 rootfs，不拷 guard 二进制：靠 F 用宿主机那一份
-    while read -r left arrow right; do
-      install -Dm644 "$right" "$CHR$right"
-      case "$left" in /*) install -Dm755 "$right" "$CHR$left" ;; esac
-    done < <(ldd "$GUARD" | awk '/=> \// {print $1, $2, $3}')
+    # 那一份；guard 是全静态的，所以 rootfs 里什么都不用放（动态解释器会以
+    # ENOENT 收场——那正是把动态构建删掉的原因）。
     set +e
     out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR" /prog 2>&1)
     code=$?
     set -e
     printf '%s\nexit=%s\n' "$out" "$code"
-    [ "$code" -eq 126 ] || fail "补上库之后 guard 应该解释并退 126，实际 $code"
-    case "$out" in *aarch64*) ;; *) fail 'rootfs 里的解释也该提到 aarch64' ;; esac
+    [ "$code" -eq 126 ] || fail "空 rootfs 里静态 guard 应该解释并退 126，实际 $code"
+    case "$out" in *aarch64*) ;; *) fail '空 rootfs 里的解释也该提到 aarch64' ;; esac
+    case "$out" in *--handover*) ;; *) fail '解释里应给出 --handover 这条出路' ;; esac
 
-    # 挂了 /proc 后，guard 能看出自己在 chroot 里（提示改成“模拟器在本 rootfs 里要能找到”）
+    # 挂了 /proc 后，guard 能看出自己在 chroot 里（提示相应改变）
     mount -t proc proc "$CHR/proc"
     set +e
     out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR" /prog 2>&1)
@@ -651,33 +645,6 @@ kernel-test:
     fi
     rm -rf "${CHR:?}"
 
-    # 静态解释器 + F：rootfs 里什么都不放也能跑（qemu-user-static 就是这个组合）
-    if [ -x "$PWD/target/static/aosc-exec-guard" ]; then
-      step 'chroot：静态解释器 + F —— 空 rootfs 也能解释'
-      static_line=$(grep -F ':aosc-exec-guard-aarch64:' data/binfmt.d/zz-aosc-exec-guard.conf.in)
-      static_line=${static_line//\/usr\/bin\/aosc-exec-guard/$PWD/target/static/aosc-exec-guard}
-      [ -e "$ENTRY" ] && echo -1 > "$ENTRY"
-      printf '%s\n' "$static_line" > "$BM/register"
-      CHR2=$PWD/$TMP/chroot-bare
-      rm -rf "${CHR2:?}"
-      mkdir -p "${CHR2:?}"
-      cp "$TMP/aarch64.elf" "$CHR2/prog"
-      chmod +x "$CHR2/prog"
-      set +e
-      out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR2" /prog 2>&1)
-      code=$?
-      set -e
-      printf '%s\nexit=%s\n' "$out" "$code"
-      [ "$code" -eq 126 ] || fail "静态 guard 应该能在空 rootfs 里解释，实际 $code"
-      case "$out" in *aarch64*) ;; *) fail '空 rootfs 里的解释也该提到 aarch64' ;; esac
-      rm -rf "${CHR2:?}"
-      # 换回动态条目的设置，后面的转发测试还要用
-      [ -e "$ENTRY" ] && echo -1 > "$ENTRY"
-      printf '%s\n' "$line" > "$BM/register"
-    else
-      echo '（没有 target/static/aosc-exec-guard：跳过“静态解释器 + F”的 chroot 验证，可先跑 just build-static）'
-    fi
-
     if [ -x "$TMP/busybox-aarch64" ] && [ "$QEMU_WAS_ENABLED" = yes ]; then
       step 'chroot（没挂 /proc）：guard 转不了，提示 --handover 这条出路'
       [ -e "$QEMU_ENTRY" ] && echo 1 > "$QEMU_ENTRY"
@@ -687,11 +654,6 @@ kernel-test:
       cp "$TMP/aarch64.elf" "$CHR3/prog"
       chmod +x "$CHR3/prog"
       cp "$TMP/busybox-aarch64" "$CHR3/busybox"
-      # 动态 guard 要在空 rootfs 里跑起来还得带上 ld.so/库（原因见上面）；这里只是为了拿它那句解释
-      while read -r left arrow right; do
-        install -Dm644 "$right" "$CHR3$right"
-        case "$left" in /*) install -Dm755 "$right" "$CHR3$left" ;; esac
-      done < <(ldd "$GUARD" | awk '/=> \// {print $1, $2, $3}')
       set +e
       out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR3" /prog 2>&1)
       code=$?
@@ -764,7 +726,7 @@ systemd-install-test:
     esac
 
     CONF_DST=/usr/lib/binfmt.d/zz-aosc-exec-guard.conf
-    GUARD=$PWD/target/release/aosc-exec-guard
+    GUARD=$PWD/target/static/aosc-exec-guard
     [ -x "$GUARD" ] || { echo "找不到 $GUARD；先跑 just build" >&2; exit 1; }
     BM=/proc/sys/fs/binfmt_misc
     ENTRY=$BM/aosc-exec-guard-aarch64

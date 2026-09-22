@@ -64,6 +64,7 @@ data/binfmt.d/zz-aosc-exec-guard.conf.in  规则模板（全集，22 条，抄�
 
 ```console
 $ just                    # 列出全部配方
+$ just build              # 静态构建（唯一构建，见下文“构建”）
 $ just test               # 单测 + 直接调用 + stub 弹框/仿真器 + installer
 ```
 
@@ -115,7 +116,7 @@ $ rm -f ~/.config/aosc-exec-guard.conf
 binfmt_misc 条目是**宿主**注册的（严格说，是**用户命名空间**级别的内核状态），chroot 隔离不掉它：rootfs 里跑外架构程序，条目照样命中。实测过的事实：
 
 - 我们的 conf 和 qemu 的 conf 都带 **`F`（fix binary）**：解释器文件在**注册时**就被打开、之后一直用那个文件，所以解释器**不要求在 rootfs 里存在**（挂载命名空间、`chroot` 都改不了这一点）。但**静态**解释器才能完全零依赖跑起来——`qemu-user-static` 的 static + `F` 正是这个组合。
-- 动态链接的解释器（现在 `just build` 的产物）还会在 exec 时去 **rootfs** 里找它的 `ld.so`/库，找不到就以 `ENOENT` 收场：shell 报“没有那个文件或目录”（`No such file or directory`），而不是 `Exec format error`——别被这句绕进去。
+- 如果某个条目的解释器是**动态链接**的（比如动态安装的 qemu-user），exec 时它还会去 **rootfs** 里找自己的 `ld.so`/库，找不到就以 `ENOENT` 收场：shell 报“没有那个文件或目录”（`No such file or directory`），而不是 `Exec format error`——别被这句绕进去。guard 自己是全静态的（见“构建”），不吃这个亏。
 
 ### guard 在 chroot 里“让位”（默认行为）
 
@@ -166,22 +167,16 @@ guard 就**把自己从路径里拿掉**：注销全部 `aosc-exec-guard-*` 条�
 
 另外注意“**guard 能跑起来 ≠ 能把程序跑起来**”：静态 guard + `F` 可以让 guard 进程在空 rootfs 里启动并给出解释，但目标程序还是要靠模拟器——空 rootfs 里没有任何可达的模拟器，guard 一样转不了（这正是 `--handover` 存在的理由）。
 
-自己的构建怎么选：
+构建：**只有静态版**——`just build` 输出 `target/static/aosc-exec-guard`（有 musl target 就用 musl，否则 glibc + `crt-static`，都是全静态）。装进 `F` 条目的就是它，chroot / 容器 里零拷贝直接可用。动态构建已经删掉：它进了 chroot / 容器 还得连 `ld.so` 和库一起拷（等于把宿主的库带进目标系统），恰恰在最需要它跑起来的地方跑不了。
 
 ```console
-# 路线 1（推荐）：guard 静态构建——chroot 里零拷贝直接可用（F 会把宿主机那份拿进来），
-# 只要 chroot 里挂了 /proc，就能借到宿主机的模拟器条目。
-$ just build-static     # 输出 target/static/aosc-exec-guard（static-pie）
-$ sudo just install     # 装静态版；或手动 install -Dm755 target/static/aosc-exec-guard /usr/bin/aosc-exec-guard
-
-# 不推荐：动态构建往 rootfs 里拷库（会把宿主的 ld.so/库带进目标系统；
-# 测试里为了观察 ENOENT/解释行为才这么做，别在真实系统上用——用静态构建，或 --handover）
-$ ldd target/release/aosc-exec-guard   # 照着把 ld.so 和各库拷到 rootfs 的同一路径
+$ just build             # 输出 target/static/aosc-exec-guard
+$ sudo just install      # 装静态版；或手动 install -Dm755 target/static/aosc-exec-guard /usr/bin/aosc-exec-guard
 ```
 
 （“注销自身”这条路线现在就是上面的 `--handover`：决定在外面做一次，注销条目 + 把 conf 改名，重启后由文件系统状态自然重放。“总是不运行”没法用“注销自身”表达这个问题仍然存在——让位后那个选择就不再生效，已写进上面的代价。）
 
-`just kernel-test` 会真的 chroot 一遍验证整条链路（动态解释器先报 ENOENT、补上库就能解释并认出 chroot；能从 `/proc/1/root` 借到宿主机条目时直接让位转发（真程序 busybox 也跑一遍）；静态解释器 + `F` 时空 rootfs 也能解释）。
+`just kernel-test` 会真的 chroot 一遍验证整条链路（静态解释器 + `F`：空 rootfs 里零拷贝就能给出解释、挂上 /proc 后认出 chroot 并改提示；能从 `/proc/1/root` 借到宿主机条目时直接让位转发（真程序 busybox 也跑一遍）；没挂 /proc、又借不到条目的 chroot 里提示 `--handover` 这条出路，让位后再进同一个 chroot，内核的 qemu 条目直接把 busybox 跑出 `aarch64`）。
 
 ## 内核端到端测试做了什么
 
@@ -189,7 +184,7 @@ $ ldd target/release/aosc-exec-guard   # 照着把 ld.so 和各库拷到 rootfs 
 2. 注册后立刻用 `/usr/bin/true` 冒烟：本机程序必须还能跑，否则立即中止并清理；
 3. 同时保留 `qemu-aarch64` 条目，观察两者谁先匹配（注册顺序语义实测）；
 4. 暂时禁用 `qemu-aarch64`，跑一个伪造的 aarch64 ELF 和（若已下载）真实 busybox，检查解释文本与退出码 126；
-5. chroot 一遍：宿主条目照样命中（`F` 让内核用注册时打开的解释器；动态解释器还差 rootfs 里的 ld.so → ENOENT），补上库后能解释、认出 chroot 并改提示；能从 `/proc/1/root` 借到宿主机条目时直接让位转发（真程序 busybox 也跑一遍）；没挂 /proc 的 chroot 里只能解释、提示 `--handover` 这条出路；让位之后再进同一个 chroot，内核的 qemu 条目直接把 busybox 跑出 `aarch64`；
+5. chroot 一遍：宿主条目照样命中；静态解释器 + `F` 让空 rootfs 里零拷贝就能解释，挂上 /proc 后能认出 chroot 并改提示；能从 `/proc/1/root` 借到宿主机条目时直接让位转发（真程序 busybox 也跑一遍）；没挂 /proc 的 chroot 里只能解释、提示 `--handover` 这条出路；让位之后再进同一个 chroot，内核的 qemu 条目直接把 busybox 跑出 `aarch64`；
 6. 把 `AOSC_EXEC_GUARD_QEMU=always` 交给真实的 `binfmt_misc` 调用链，让 busybox 经 guard → qemu 跑起来（`uname -m` 输出 aarch64）；
 7. 恢复 `qemu-aarch64`、注销 guard，确认原来的模拟器行为回来。
 
@@ -200,7 +195,7 @@ $ ldd target/release/aosc-exec-guard   # 照着把 ld.so 和各库拷到 rootfs 
 - **与模拟器条目的优先级**：已实测，见"实测结论"——systemd-binfmt 按文件名排序应用 conf、后应用者优先；`zz-aosc-exec-guard.conf` 排在 `qemu-*` 之后，所以**干净启动时 guard 先匹配**，由它询问/转发给模拟器（`AOSC_EXEC_GUARD_QEMU=never` 可让它不插手）。不想让 guard 介入的发行版/用户，把 conf 删掉或改名排到 qemu 前面即可，qemu 条目会照旧直接接管；`--handover` 就是把这件事做全（注销条目 + 停用 conf）。
 - **`--handover` 的代价**：让位之后 guard 的询问/解释不再出现，“总是不运行”这类用户级选择失效（见「让位给内核的 qemu 条目」）。
 - **ENOENT 盲区**：缺解释器的情况（如 32 位程序找不到 `/lib/ld-linux.so.2`、shebang 解释器不存在）报的是 `ENOENT` 而不是 `ENOEXEC`，`binfmt_misc` 拦不到，需要另行设计。
-- 文案暂未接 i18n（先用中文）；生产构建建议静态链接（`just build-static`）。
+- 文案暂未接 i18n（先用中文）；生产构建就是静态的（`just build`，见上文“构建”）。
 
 ## 实测结论（2026-09-22，AOSC OS 13 / x86_64，已装 qemu-aarch64-static）
 
