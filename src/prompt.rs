@@ -7,9 +7,9 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use dialoguer::{Select, console::Term};
+use rust_i18n::t;
 
 use crate::elf::arch_sentence;
-use crate::i18n::Lang;
 use crate::platform::DisplayMode;
 use crate::qemu::QemuEntry;
 
@@ -23,31 +23,29 @@ pub struct AskOutcome {
 
 /// 询问是否交给 qemu 运行；返回 None 表示没有可用的询问界面（不打扰用户）。
 pub fn ask_run_via_qemu(
-    lang: Lang,
     entry: &QemuEntry,
     target: &Path,
     info: &crate::elf::ElfInfo,
     mode: DisplayMode,
 ) -> Option<AskOutcome> {
     if mode == DisplayMode::Dialog
-        && let Some(outcome) = ask_dialog(lang, entry, target, info)
+        && let Some(outcome) = ask_dialog(entry, target, info)
     {
         return Some(outcome);
     }
-    ask_terminal(lang, entry, target, info)
+    ask_terminal(entry, target, info)
 }
 
 /// 图形询问：一个“不再询问”复选框加上运行/不运行两个按钮。
-fn ask_dialog(
-    lang: Lang,
-    entry: &QemuEntry,
-    target: &Path,
-    info: &crate::elf::ElfInfo,
-) -> Option<AskOutcome> {
+fn ask_dialog(entry: &QemuEntry, target: &Path, info: &crate::elf::ElfInfo) -> Option<AskOutcome> {
+    let title = t!("dialog-title");
+    let run_label = t!("run-label");
+    let decline_label = t!("decline-label");
+    let dont_ask_again = t!("dont-ask-again");
     let question = format!(
         "{}\n\n{}",
-        qemu_question(lang, target, info),
-        lang.run_with_prompt(&entry.name)
+        qemu_question(target, info),
+        t!("run-with-prompt", entry = entry.name)
     );
 
     // zenity 的问题对话框没有复选框，用只有一个条目的复选列表代替
@@ -57,20 +55,20 @@ fn ask_dialog(
             "--list",
             "--checklist",
             "--hide-header",
-            &format!("--title={}", lang.dialog_title()),
+            &format!("--title={title}"),
             "--column= ",
-            &format!("--column={}", lang.dont_ask_again()),
+            &format!("--column={dont_ask_again}"),
             "--print-column=2",
-            &format!("--ok-label={}", lang.run_label()),
-            &format!("--cancel-label={}", lang.decline_label()),
+            &format!("--ok-label={run_label}"),
+            &format!("--cancel-label={decline_label}"),
             &format!("--text={}", escape_markup(&question)),
             "FALSE",
-            lang.dont_ask_again(),
+            &dont_ask_again,
         ])
         .stdin(Stdio::null())
         .output();
     if let Ok(output) = zenity
-        && let Some(outcome) = ask_outcome(&output, lang)
+        && let Some(outcome) = ask_outcome(&output)
     {
         return Some(outcome);
     }
@@ -78,19 +76,19 @@ fn ask_dialog(
     // kdialog 的复选列表同理（它的消息框有复选框，但不能自定义按钮文字）。
     let kdialog = Command::new("kdialog")
         .args([
-            &format!("--title={}", lang.dialog_title()),
-            &format!("--ok-label={}", lang.run_label()),
-            &format!("--cancel-label={}", lang.decline_label()),
+            &format!("--title={title}"),
+            &format!("--ok-label={run_label}"),
+            &format!("--cancel-label={decline_label}"),
             "--checklist",
             &question,
             "1",
-            lang.dont_ask_again(),
+            &dont_ask_again,
             "off",
         ])
         .stdin(Stdio::null())
         .output();
     if let Ok(output) = kdialog
-        && let Some(outcome) = ask_outcome(&output, lang)
+        && let Some(outcome) = ask_outcome(&output)
     {
         return Some(outcome);
     }
@@ -100,12 +98,12 @@ fn ask_dialog(
 
 /// 0 = 按了“运行”（勾选框时 zenity 打印条目文字、kdialog 打印条目编号），
 /// 1 = 按了“不运行”，其它（没装、启动失败、被信号杀掉）= 本次没答案，换下一个工具试。
-fn ask_outcome(output: &Output, lang: Lang) -> Option<AskOutcome> {
+fn ask_outcome(output: &Output) -> Option<AskOutcome> {
     let printed = String::from_utf8_lossy(&output.stdout);
     match output.status.code() {
         Some(0) => Some(AskOutcome {
             run: true,
-            remember: printed.contains('1') || printed.contains(lang.dont_ask_again()),
+            remember: printed.contains('1') || printed.contains(&*t!("dont-ask-again")),
         }),
         Some(1) => Some(AskOutcome {
             run: false,
@@ -118,7 +116,6 @@ fn ask_outcome(output: &Output, lang: Lang) -> Option<AskOutcome> {
 /// 终端询问：用 dialoguer 画一个上下键选择的菜单。
 /// stdin 读不了键、或 stderr 画不出菜单时返回 None（不打扰用户）。
 fn ask_terminal(
-    lang: Lang,
     entry: &QemuEntry,
     target: &Path,
     info: &crate::elf::ElfInfo,
@@ -127,18 +124,14 @@ fn ask_terminal(
         return None;
     }
 
-    eprintln!("aosc-exec-guard: {}", qemu_question(lang, target, info));
+    eprintln!("aosc-exec-guard: {}", qemu_question(target, info));
 
     // 以前是 [y/N/a/s]；“总是不运行”不再给菜单入口（要固定成从不运行就手写
     // `qemu = never` 配置或 `AOSC_EXEC_GUARD_QEMU=never`），默认项仍是“不运行”。
-    let items = [
-        lang.menu_run_once(),
-        lang.menu_decline(),
-        lang.menu_always(),
-    ];
+    let items = [t!("menu-run-once"), t!("menu-decline"), t!("menu-always")];
 
     let choice = Select::new()
-        .with_prompt(lang.run_with_prompt(&entry.name))
+        .with_prompt(t!("run-with-prompt", entry = entry.name))
         .items(items)
         .default(1)
         .report(true)
@@ -162,11 +155,13 @@ fn ask_terminal(
 }
 
 /// 询问时的第一句：说明为什么本机不能直接跑。
-fn qemu_question(lang: Lang, target: &Path, info: &crate::elf::ElfInfo) -> String {
-    lang.qemu_question(
-        &target.display().to_string(),
-        &arch_sentence(lang, info, env::consts::ARCH),
+fn qemu_question(target: &Path, info: &crate::elf::ElfInfo) -> String {
+    t!(
+        "qemu-question",
+        path = target.display().to_string(),
+        sentence = arch_sentence(info, env::consts::ARCH)
     )
+    .to_string()
 }
 
 /// Show a modal error dialog. Returns false when no dialog tool worked.
@@ -228,20 +223,23 @@ mod tests {
             stderr: Vec::new(),
         };
 
+        let _pin = crate::i18n::pin("zh-CN");
         // zenity 勾选时打印条目文字，kdialog 打印条目编号。“运行” = 0。
-        let run = ask_outcome(&output(0, "不再询问\n"), Lang::ZhCn).unwrap();
+        let run = ask_outcome(&output(0, "不再询问\n")).unwrap();
         assert!(run.run && run.remember);
-        let run = ask_outcome(&output(0, "1\n"), Lang::ZhCn).unwrap();
+        let run = ask_outcome(&output(0, "1\n")).unwrap();
         assert!(run.run && run.remember);
-        let run = ask_outcome(&output(0, ""), Lang::ZhCn).unwrap();
+        let run = ask_outcome(&output(0, "")).unwrap();
         assert!(run.run && !run.remember);
         // 英文界面下按本地化的勾选文字解析
-        let run = ask_outcome(&output(0, "Don't ask again\n"), Lang::En).unwrap();
+        rust_i18n::set_locale("en");
+        let run = ask_outcome(&output(0, "Don't ask again\n")).unwrap();
         assert!(run.run && run.remember);
+        rust_i18n::set_locale("zh-CN");
         // “不运行” = 1；启动失败/被信号杀死 = 没答案，换下一个对话框工具。
-        let declined = ask_outcome(&output(1, ""), Lang::ZhCn).unwrap();
+        let declined = ask_outcome(&output(1, "")).unwrap();
         assert!(!declined.run && !declined.remember);
-        assert!(ask_outcome(&output(255, ""), Lang::ZhCn).is_none());
+        assert!(ask_outcome(&output(255, "")).is_none());
     }
 
     #[test]

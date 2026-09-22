@@ -20,8 +20,8 @@ use std::process::Command;
 
 use clap::ValueEnum;
 use dialoguer::Confirm;
+use rust_i18n::t;
 
-use crate::i18n::{Lang, lang};
 use crate::platform::{in_chroot, in_container};
 use crate::qemu::{binfmt_dir, enabled_qemu_entries, guard_entries, registry_visible};
 
@@ -62,7 +62,6 @@ pub fn run(action: Action, assume_yes: bool) -> i32 {
 }
 
 fn hand_over(assume_yes: bool) -> Result<(), String> {
-    let l = lang();
     check_host_context()?;
     let dir = binfmt_dir();
     let (installed, disabled) = conf_files();
@@ -70,66 +69,80 @@ fn hand_over(assume_yes: bool) -> Result<(), String> {
 
     if installed.is_empty() && entries.is_empty() {
         return if disabled.is_empty() {
-            Err(l.ho_nothing_installed(CONF_NAME))
+            Err(t!("ho-nothing-installed", conf_name = CONF_NAME).into())
         } else {
-            Err(l.ho_already(CONF_NAME, DISABLED_SUFFIX))
+            Err(t!(
+                "ho-already",
+                conf_name = CONF_NAME,
+                suffix = DISABLED_SUFFIX
+            )
+            .into())
         };
     }
 
     let qemu = enabled_qemu_entries(&dir);
     if qemu.is_empty() {
-        eprintln!("aosc-exec-guard: {}", l.ho_no_qemu_warning());
+        eprintln!("aosc-exec-guard: {}", t!("ho-no-qemu-warning"));
     }
     if installed.is_empty() {
-        eprintln!("aosc-exec-guard: {}", l.ho_no_conf_notice(CONF_NAME));
+        eprintln!(
+            "aosc-exec-guard: {}",
+            t!("ho-no-conf-notice", conf_name = CONF_NAME)
+        );
     }
 
     let question = if qemu.is_empty() {
-        l.ho_question_no_qemu()
+        t!("ho-question-no-qemu")
     } else {
-        l.ho_question()
+        t!("ho-question")
     };
-    if !assume_yes && !confirm(question)? {
-        println!("aosc-exec-guard: {}", l.cancelled());
+    if !assume_yes && !confirm(&question)? {
+        println!("aosc-exec-guard: {}", t!("cancelled"));
         return Ok(());
     }
 
     for path in &installed {
         let target = disabled_path(path);
-        std::fs::rename(path, &target)
-            .map_err(|err| l.ho_disable_failed(&path.display().to_string(), &err))?;
-        println!("{}", l.ho_disabled(&path.display().to_string()));
+        std::fs::rename(path, &target).map_err(|err| {
+            t!(
+                "ho-disable-failed",
+                path = path.display().to_string(),
+                err = err
+            )
+            .to_string()
+        })?;
+        println!("{}", t!("ho-disabled", path = path.display().to_string()));
     }
     for name in &entries {
         unregister(&dir, name)?;
-        println!("{}", l.ho_unregistered(name));
+        println!("{}", t!("ho-unregistered", name = name));
     }
 
     let left = guard_entries(&dir);
     if !left.is_empty() {
-        let sep = match l {
-            Lang::ZhCn => "、",
-            Lang::En => ", ",
-        };
-        return Err(l.ho_residue(&left.join(sep)));
+        return Err(t!("ho-residue", list = left.join(&t!("list-separator"))).into());
     }
 
-    println!("{}", l.ho_done());
-    println!("{}", l.ho_restore_hint());
+    println!("{}", t!("ho-done"));
+    println!("{}", t!("ho-restore-hint"));
 
     Ok(())
 }
 
 fn take_back(assume_yes: bool) -> Result<(), String> {
-    let l = lang();
     check_host_context()?;
     let dir = binfmt_dir();
     let (_, disabled) = conf_files();
     if disabled.is_empty() {
-        return Err(l.tb_not_handed(CONF_NAME, DISABLED_SUFFIX));
+        return Err(t!(
+            "tb-not-handed",
+            conf_name = CONF_NAME,
+            suffix = DISABLED_SUFFIX
+        )
+        .into());
     }
-    if !assume_yes && !confirm(l.tb_question())? {
-        println!("aosc-exec-guard: {}", l.cancelled());
+    if !assume_yes && !confirm(&t!("tb-question"))? {
+        println!("aosc-exec-guard: {}", t!("cancelled"));
         return Ok(());
     }
 
@@ -137,57 +150,61 @@ fn take_back(assume_yes: bool) -> Result<(), String> {
         let Some(conf) = enabled_path(path) else {
             continue;
         };
-        std::fs::rename(path, &conf)
-            .map_err(|err| l.tb_restore_failed(&path.display().to_string(), &err))?;
-        println!("{}", l.tb_restored(&conf.display().to_string()));
+        std::fs::rename(path, &conf).map_err(|err| {
+            t!(
+                "tb-restore-failed",
+                path = path.display().to_string(),
+                err = err
+            )
+            .to_string()
+        })?;
+        println!("{}", t!("tb-restored", path = conf.display().to_string()));
     }
 
     if env::var_os("AOSC_EXEC_GUARD_BINFMT_DIR").is_some() {
-        println!("{}", l.tb_test_mode());
+        println!("{}", t!("tb-test-mode"));
         return Ok(());
     }
     restart_binfmt()?;
     let entries = guard_entries(&dir);
     if entries.is_empty() {
-        return Err(l.tb_verify_failed().into());
+        return Err(t!("tb-verify-failed").into());
     }
-    println!("{}", l.tb_done(entries.len()));
+    println!("{}", t!("tb-done", count = entries.len()));
     Ok(())
 }
 
 /// 让位必须做在宿主机上：注册表、配置文件、以及重启后的重放得属于同一个系统。
 fn check_host_context() -> Result<(), String> {
-    let l = lang();
     if in_chroot() {
-        return Err(l.ctx_chroot().into());
+        return Err(t!("ctx-chroot").into());
     }
     if in_container() {
-        return Err(l.ctx_container().into());
+        return Err(t!("ctx-container").into());
     }
     if !registry_visible() {
-        return Err(l.ctx_no_registry().into());
+        return Err(t!("ctx-no-registry").into());
     }
     Ok(())
 }
 
 fn confirm(question: &str) -> Result<bool, String> {
-    let l = lang();
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
-        return Err(l.confirm_needs_tty().into());
+        return Err(t!("confirm-needs-tty").into());
     }
     Confirm::new()
         .with_prompt(question)
         .default(false)
         .interact()
-        .map_err(|err| l.confirm_failed(&err))
+        .map_err(|err| t!("confirm-failed", err = err).into())
 }
 
 /// 注销注册表里的一个条目：写 `-1`（内核语义）。测试目录（普通文件）里写完再
 /// 删掉文件；真实的 procfs 里内核会把文件本身收走。
 fn unregister(dir: &Path, name: &str) -> Result<(), String> {
-    let l = lang();
     let path = dir.join(name);
-    std::fs::write(&path, "-1").map_err(|err| l.ho_unregister_failed(name, &err))?;
+    std::fs::write(&path, "-1")
+        .map_err(|err| t!("ho-unregister-failed", name = name, err = err).to_string())?;
     if env::var_os("AOSC_EXEC_GUARD_BINFMT_DIR").is_some() {
         let _ = std::fs::remove_file(&path);
     }
@@ -196,7 +213,6 @@ fn unregister(dir: &Path, name: &str) -> Result<(), String> {
 
 /// 重启 systemd-binfmt，让它按 conf 重新注册条目。
 fn restart_binfmt() -> Result<(), String> {
-    let l = lang();
     // 先清掉 systemd 的开始频率限制：restart 的 stop 阶段会注销所有条目，
     // 若 start 被限流挡住就什么都不剩（和 scripts/install.sh 同款处理）。
     let _ = Command::new("systemctl")
@@ -205,9 +221,9 @@ fn restart_binfmt() -> Result<(), String> {
     let status = Command::new("systemctl")
         .args(["restart", "systemd-binfmt.service"])
         .status()
-        .map_err(|err| l.restart_failed(&err))?;
+        .map_err(|err| t!("restart-failed", err = err).to_string())?;
     if !status.success() {
-        return Err(l.restart_status_failed().into());
+        return Err(t!("restart-status-failed").into());
     }
     Ok(())
 }

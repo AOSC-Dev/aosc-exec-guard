@@ -53,7 +53,9 @@ src/handover.rs              让位给内核的 qemu 条目（--handover）
 src/prompt.rs                询问：zenity/kdialog 弹框、dialoguer 终端菜单、出错弹框
 src/platform.rs              环境判定：终端 / 图形 / systemd 服务 / chroot
 src/config.rs                设置：--qemu、AOSC_EXEC_GUARD_QEMU、/etc 与用户配置的优先级与读写
-src/i18n.rs                  内置中/英文案（消息表由 fixed!/text! 宏生成，见下文“语言”）
+src/i18n.rs                  语言判定（文案在 locales/*.yml，由 rust-i18n 编译期嵌入）
+locales/en.yml               英文文案（基准语言：缺翻译回退到它）
+locales/zh-CN.yml            中文文案
 justfile                     开发/测试/安装入口（just / just test / sudo just install …）
 rust-toolchain.toml         rustup：stable + 各主架构的 musl 标准库（静态构建用）
 scripts/install.sh           安装/卸载脚本（just install 就是调它；打包可直接调，不必依赖 just）
@@ -113,11 +115,11 @@ $ sudo sh -c 'echo -1 > /proc/sys/fs/binfmt_misc/aosc-exec-guard-aarch64'
 $ rm -f ~/.config/aosc-exec-guard.conf   # 用户选择；系统默认在 /etc/aosc-exec-guard.conf
 ```
 
-## 语言（内置中文 / English）
+## 语言（中文 / English）
 
-guard 的文案（解释文本、终端菜单、zenity/kdialog 弹框、`--handover` 输出、写入配置文件的注释）都在二进制里，中英两套，编译期就带上了——chroot / 容器 里没有 `/usr/share/locale`、也没有 gettext 时照样能显示，静态单文件这点不变。
+guard 的文案（解释文本、终端菜单、zenity/kdialog 弹框、`--handover` 输出、写入配置文件的注释、连 `--help`）都在 `locales/*.yml` 里，一门语言一份文件，由 [rust-i18n](https://crates.io/crates/rust-i18n) 在**编译期**嵌进二进制——运行时不读任何文件，chroot / 容器 / 空 rootfs 里没有 `/usr/share/locale` 也无所谓。
 
-选语言的顺序：`AOSC_EXEC_GUARD_LANG` > `LC_ALL` > `LC_MESSAGES` > `LANG`；认不出来的 locale 落英文；一个都没设时用中文（面向 AOSC 用户）。想临时换一种：
+现在有 `locales/en.yml`（基准语言：别的语言缺翻译就回退到它）和 `locales/zh-CN.yml`。选语言的顺序：`AOSC_EXEC_GUARD_LANG` > `LC_ALL` > `LC_MESSAGES` > `LANG`；`zh*` 用中文，其它 locale 先按英文来；一个都没设（服务、chroot 里很常见）默认中文。想临时换一种：
 
 ```console
 $ AOSC_EXEC_GUARD_LANG=en aosc-exec-guard ./program   # 这一次用英文
@@ -126,9 +128,14 @@ $ LC_ALL=en_US.UTF-8 ./program                        # 或者靠 locale 变量
 
 它只影响文案，不影响任何判定（转不转发、什么时候问，跟语言无关）。
 
-`--help` 也是本地化的：说明行、“用法:”标题、`参数:` / `选项:` 两个小节、以及 `-h, --help` / `-v, --version` 两行都跟着语言走。做法照 oma：clap 的属性里直接写 `help = lang().…()`（oma 写的是 `fl!()`，都是运行时取值）、内置的 help/version 开关禁掉后用本地化文案自己重加、`help_template` 与 `next_help_heading` 管标题。唯二不跟语言走的是 clap 自己那两小段：帮助末尾附录的 `[possible values: …]`（oma 也一样），以及解析出错时的英文报错——oma 是用他们自己的 `clap-i18n-richformatter`（fluent）抹平的，guard 为了零依赖 / 静态单文件没有引入。
+`--help` 也走同一套文案：说明行、“用法:”标题、`参数:` / `选项:` 两个小节、`-h, --help` / `-v, --version` 两行都跟着语言走。做法照 oma：clap 的属性里直接写 `t!(…)`（oma 写的是 `fl!()`，都是运行时取值）、内置的 help/version 开关禁掉后用本地化文案自己重加、`help_template` 与 `next_help_heading` 管标题。剩下没跟语言走的只有 clap 自己附在取值后面的 `[possible values: …]`（oma 也一样），以及解析出错时 clap 自己的报错。
 
-加一门语言 = 给 `src/i18n.rs` 里 `fixed!` / `text!` 两张表各加一列，再补上 `Lang` 的枚举分支：每条消息就是一行数据，不用再写函数。
+改动怎么落：
+
+- **加一条消息**：`locales/en.yml` 和 `locales/zh-CN.yml` 各加一行（键用小写连字符，占位符写成 `%{名字}`），代码里写 `t!("键")` / `t!("键", 名字 = 值)`。
+- **加一门语言**：照 `en.yml` 抄一份翻掉，放到 `locales/<locale>.yml`（如 `locales/de.yml`，缺翻译的条目不用管，会自动回退英文），在 `Cargo.toml` 的 `[package.metadata.i18n] available-locales` 里加上它，再到 `src/i18n.rs` 的 `locale_for()` 里加一条前缀映射。
+- 键写错、占位符对不上、哪种语言漏了键、代码里用了不存在的键、文案里有没人用的键——`cargo test` 里的 `i18n` 测试都会报出来（把 `locales/` 和 `src/*.rs` 两边的键集与占位符对一遍）。
+- 还有现成工具：`cargo i18n`（`rust-i18n-cli`）能扫源码把没翻的键抽成 TODO 文件；VS Code 里装 I18n Ally 可以直接看/填翻译。
 
 ## chroot / 容器里
 

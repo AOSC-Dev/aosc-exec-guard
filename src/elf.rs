@@ -8,7 +8,8 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use crate::i18n::Lang;
+use rust_i18n::t;
+
 use crate::platform::{in_chroot, in_container};
 use crate::qemu::{QemuEntry, registry_visible};
 
@@ -109,10 +110,10 @@ pub fn machine_name(machine: u16) -> Option<&'static str> {
     })
 }
 
-pub fn describe(lang: Lang, machine: u16) -> String {
+pub fn describe(machine: u16) -> String {
     match machine_name(machine) {
         Some(name) => name.to_string(),
-        None => lang.unknown_machine(machine),
+        None => t!("unknown-machine", machine = format!("{machine:x}")).to_string(),
     }
 }
 
@@ -172,16 +173,17 @@ pub fn classify(path: &Path, native: Option<u16>) -> Verdict {
 }
 
 /// “该程序是为 X 构建的 N 位程序，而本机是 Y”。
-pub fn arch_sentence(lang: Lang, info: &ElfInfo, native_label: &str) -> String {
-    lang.arch_sentence(
-        &describe(lang, info.machine),
-        info.class.bits(),
-        native_label,
+pub fn arch_sentence(info: &ElfInfo, native_label: &str) -> String {
+    t!(
+        "arch-sentence",
+        machine = describe(info.machine),
+        bits = info.class.bits(),
+        native = native_label
     )
+    .to_string()
 }
 
 pub fn build_message(
-    lang: Lang,
     path: &Path,
     native_label: &str,
     verdict: &Verdict,
@@ -191,22 +193,34 @@ pub fn build_message(
     match verdict {
         Verdict::ArchMismatch(info) => {
             let hint = match qemu {
-                Some(entry) => lang.hint_emulator_installed(&entry.name),
+                Some(entry) => t!("hint-emulator-installed", entry = entry.name),
                 // 宿主机注册的条目在 chroot 里照样会命中；但 guard 找模拟器时
                 // 必须在脚下看到那个文件（F 只让内核重用注册时打开的解释器
                 // 文件，guard 转发时 exec 的仍然是路径）。chroot（没挂 /proc，
                 // 认不出来）、容器里都是这样：没有任何可达路径，只能解释。
-                None if in_chroot() || in_container() || !registry_visible() => {
-                    lang.hint_isolated().to_string()
-                }
-                None => lang.hint_install_emulator().to_string(),
+                None if in_chroot() || in_container() || !registry_visible() => t!("hint-isolated"),
+                None => t!("hint-install-emulator"),
             };
-            lang.cannot_run(&path, &arch_sentence(lang, info, native_label), &hint)
+            t!(
+                "cannot-run",
+                path = path,
+                why = arch_sentence(info, native_label),
+                hint = hint
+            )
+            .to_string()
         }
-        Verdict::NativeButRejected(info) => {
-            lang.native_but_rejected(&path, &describe(lang, info.machine))
-        }
-        Verdict::NotElf(reason) => lang.cannot_run_notelf(&path, lang.not_elf_reason(*reason)),
+        Verdict::NativeButRejected(info) => t!(
+            "native-but-rejected",
+            path = path,
+            machine = describe(info.machine)
+        )
+        .to_string(),
+        Verdict::NotElf(reason) => t!(
+            "cannot-run-notelf",
+            path = path,
+            why = crate::i18n::not_elf_reason(*reason)
+        )
+        .to_string(),
     }
 }
 
@@ -271,12 +285,14 @@ mod tests {
             endian: Endian::Little,
             machine: 0xb7,
         });
-        let message = build_message(Lang::ZhCn, Path::new("/tmp/app"), "x86_64", &verdict, None);
+        let _pin = crate::i18n::pin("zh-CN");
+        let message = build_message(Path::new("/tmp/app"), "x86_64", &verdict, None);
         assert!(message.contains("aarch64"));
         assert!(message.contains("x86_64"));
         assert!(message.contains("64 位"));
 
-        let english = build_message(Lang::En, Path::new("/tmp/app"), "x86_64", &verdict, None);
+        rust_i18n::set_locale("en");
+        let english = build_message(Path::new("/tmp/app"), "x86_64", &verdict, None);
         assert!(english.contains("cannot run"));
         assert!(english.contains("64-bit"));
         assert!(!english.contains("无法"));
@@ -294,13 +310,8 @@ mod tests {
             interpreter: PathBuf::from("/usr/bin/qemu-aarch64-static"),
             flags: "OCF".to_string(),
         };
-        let message = build_message(
-            Lang::ZhCn,
-            Path::new("/tmp/app"),
-            "x86_64",
-            &verdict,
-            Some(&entry),
-        );
+        let _pin = crate::i18n::pin("zh-CN");
+        let message = build_message(Path::new("/tmp/app"), "x86_64", &verdict, Some(&entry));
         assert!(message.contains("qemu-aarch64"));
         assert!(message.contains("AOSC_EXEC_GUARD_QEMU"));
     }
@@ -312,14 +323,16 @@ mod tests {
             endian: Endian::Little,
             machine: 0x3e,
         });
-        let message = build_message(Lang::ZhCn, Path::new("/tmp/app"), "x86_64", &verdict, None);
+        let _pin = crate::i18n::pin("zh-CN");
+        let message = build_message(Path::new("/tmp/app"), "x86_64", &verdict, None);
         assert!(message.contains("损坏"));
     }
 
     #[test]
     fn message_reports_non_elf() {
         let verdict = Verdict::NotElf(NotElfReason::NotElf);
-        let message = build_message(Lang::ZhCn, Path::new("/tmp/app"), "x86_64", &verdict, None);
+        let _pin = crate::i18n::pin("zh-CN");
+        let message = build_message(Path::new("/tmp/app"), "x86_64", &verdict, None);
         assert!(message.contains("不是 ELF"));
     }
 }

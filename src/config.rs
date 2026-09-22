@@ -4,8 +4,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use clap::ValueEnum;
+use rust_i18n::t;
 
-use crate::i18n::lang;
 use crate::platform::in_chroot;
 use crate::qemu::registry_visible;
 
@@ -85,8 +85,8 @@ fn load_saved_qemu_mode() -> Option<QemuMode> {
 }
 
 pub fn save_qemu_mode(mode: QemuMode) -> std::io::Result<()> {
-    let l = lang();
-    let path = user_config_path().ok_or_else(|| std::io::Error::other(l.no_config_dir()))?;
+    let path =
+        user_config_path().ok_or_else(|| std::io::Error::other(t!("no-config-dir").to_string()))?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -95,7 +95,7 @@ pub fn save_qemu_mode(mode: QemuMode) -> std::io::Result<()> {
         QemuMode::Always => "always",
         QemuMode::Never => "never",
     };
-    std::fs::write(path, l.user_config_content(value))
+    std::fs::write(path, &*t!("user-config-content", value = value))
 }
 
 #[cfg(test)]

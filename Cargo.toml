@@ -7,19 +7,28 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 # Only for argument parsing; color support is pointless for a binfmt
-# interpreter whose stderr goes to logs and dialog callers.
+# interpreter whose stderr goes to logs and dialog callers. The "string"
+# feature lets the help text be built at runtime (localized via rust-i18n).
 clap = { version = "4", default-features = false, features = [
     "std",
     "help",
     "usage",
     "error-context",
     "suggestions",
+    "string",
     "derive",
 ] }
 # Terminal prompt menu for the qemu offer; the editor/password helpers are
 # not needed, so the default features stay off.
 dialoguer = { version = "0.12", default-features = false }
 dirs = "7.0.0"
+rust-i18n = "4.2.2"
+
+# 给 `cargo i18n`（rust-i18n-cli）抽取/校对翻译用；运行时不看这段。
+[package.metadata.i18n]
+available-locales = ["en", "zh-CN"]
+default-locale = "en"
+load-path = "locales"
 
 [profile.release]
 strip = true

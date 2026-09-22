@@ -1,0 +1,90 @@
+# 英文文案（基准语言：缺翻译的语言回退到这里；键必须齐）。
+# 加一条消息：这里加键值，代码里写 `t!("…")`；`cargo test` 会核对
+# 各语言键是否齐全、占位符是否对得上、代码里用的键是否存在。
+_version: 1
+
+# ---------- 通用 ----------
+dialog-title: "Cannot run this program"
+list-separator: ", "
+
+# ---------- ELF 解释 ----------
+reason-cannot-read: "cannot read the file"
+reason-too-small: "file is too small to be a valid ELF executable"
+reason-not-elf: "file is not an ELF executable"
+reason-bad-class: "unrecognized ELF class field"
+reason-bad-endian: "unrecognized ELF endianness field"
+reason-read-failed: "failed to read the file"
+unknown-machine: "unknown architecture (e_machine=0x%{machine})"
+arch-sentence: "a %{bits}-bit program built for %{machine}, but this machine is %{native}"
+hint-isolated: "Hint: this looks like a chroot / container (or the binfmt_misc registry is not visible): there is no usable emulator entry here, so the guard cannot forward. If qemu-user is installed on the host, run `sudo aosc-exec-guard --handover` outside: the guard steps aside and the kernel's qemu entries take over - they use F to open the host interpreter, so no qemu needs to exist inside the chroot / container."
+hint-install-emulator: "Hint: install an emulator for that architecture (qemu-user-static, box64, ...) and retry, or use the native AOSC OS build."
+hint-emulator-installed: "Hint: %{entry} is installed; set AOSC_EXEC_GUARD_QEMU=always to run it automatically (ask=ask every time, never=never run)."
+cannot-run: "\"%{path}\" cannot run: %{why}.\n%{hint}"
+native-but-rejected: "\"%{path}\" cannot run: it matches this machine (%{machine}), but the kernel rejected it - the file may be corrupted or in an unsupported format."
+cannot-run-notelf: "\"%{path}\" cannot run: %{why}."
+cannot-start: "cannot start %{entry}: %{err}"
+cannot-remember: "could not remember the \"don't ask again\" choice: %{err}"
+
+# ---------- 询问 ----------
+qemu-question: "\"%{path}\" cannot run on this machine directly: %{sentence}."
+run-with-prompt: "Run with %{entry}?"
+menu-run-once: "Run (once)"
+menu-decline: "Don't run (once)"
+menu-always: "Always run (don't ask again)"
+run-label: "Run"
+decline-label: "Don't run"
+dont-ask-again: "Don't ask again"
+
+# ---------- --handover ----------
+ho-no-qemu-warning: "warning: no enabled qemu-* entry in the registry - after the handover foreign binaries will simply fail with `Exec format error` (nothing explains, nothing emulates)."
+ho-question: "Let the guard step aside (unregister its binfmt entries, disable its config file) so the kernel's qemu entries handle foreign binaries directly?"
+ho-question-no-qemu: "Let the guard step aside (unregister its binfmt entries, disable its config file)? Note: there is no usable qemu entry in the registry."
+cancelled: "cancelled, nothing changed."
+ho-done: "handover done: foreign binaries are now handled by the kernel's qemu entries (host, chroot and containers alike)."
+ho-restore-hint: "to restore: `sudo aosc-exec-guard --handover=off`, or rerun the installer."
+ho-nothing-installed: "no guard binfmt entry and no config file (%{conf_name}) found: nothing to hand over."
+ho-already: "the guard is already handed over (%{conf_name}%{suffix} is still there); use `--handover=off` to restore."
+ho-no-conf-notice: "note: no config file (%{conf_name}) found; only the current entries are unregistered. If they were registered some other way they may come back after a reboot."
+ho-disable-failed: "could not disable %{path} (root needed?): %{err}"
+ho-disabled: "disabled %{path}"
+ho-unregister-failed: "could not unregister entry %{name} (root needed?): %{err}"
+ho-unregistered: "unregistered entry %{name}"
+ho-residue: "entries left behind after unregistering: %{list}"
+tb-question: "Restore the guard (rename its config file back and re-register its binfmt entries)?"
+tb-not-handed: "no disabled config file (%{conf_name}%{suffix}) found: not in the handover state."
+tb-test-mode: "(test mode: systemd-binfmt not restarted; entries return on reboot or reinstall.)"
+tb-restore-failed: "could not restore %{path} (root needed?): %{err}"
+tb-restored: "restored %{path}"
+tb-done: "restored: guard entries are back (%{count})."
+tb-verify-failed: "config file restored, but no guard entry in the registry yet: check `systemctl status systemd-binfmt.service`."
+ctx-chroot: "this looks like a chroot: the registry belongs to the host while the config files belong to the chroot - run this on the host (outside)."
+ctx-container: "this looks like a container (nested PID namespace): run this on the host (outside)."
+ctx-no-registry: "the binfmt_misc registry is not visible: run this on the host (outside)."
+confirm-needs-tty: "confirmation needed, but there is no terminal here: pass --yes (or run it in a terminal)."
+confirm-failed: "prompt failed: %{err}"
+restart-failed: "could not run systemctl (%{err}): please restart manually with `systemctl restart systemd-binfmt.service`."
+restart-status-failed: "`systemctl restart systemd-binfmt.service` failed: please restart it manually and check."
+
+# ---------- 用户配置文件 ----------
+no-config-dir: "cannot locate the user config dir (HOME / XDG_CONFIG_HOME)"
+user-config-content: "# aosc-exec-guard user settings (written when \"don't ask again\" was chosen)\n# qemu: ask=ask every time (default) / always=always run via the emulator / never=never run\nqemu = %{value}\n"
+
+# ---------- 命令行 / --help（由 main.rs 的 clap 属性在运行时取用）----------
+cli-about: "explain why a program cannot run on this machine (binfmt_misc interpreter)."
+cli-usage: "aosc-exec-guard [OPTIONS] <PROGRAM> [ARGS…]"
+# clap 自己的模板占位符（`{before-help}` 等）和 rust-i18n 的 `%{…}` 不冲突。
+cli-help-template: "{before-help}{about-with-newline}\nUsage: {usage}\n\n{all-args}{after-help}"
+cli-arguments-heading: "Arguments"
+cli-options-heading: "Options"
+cli-after-help: "(normally invoked by the kernel through binfmt_misc; only `--handover` is meant to be run by hand, as root.)"
+cli-path-value: "PROGRAM"
+cli-mode-value: "MODE"
+cli-action-value: "ACTION"
+cli-path-help: "path of the program that cannot run (the arguments after it belong to the program)"
+cli-no-dialog-help: "never open a dialog (same as AOSC_EXEC_GUARD_NO_DIALOG=1)"
+cli-debug-help: "print the decision and other debug info (incl. binfmt registry visibility; same as AOSC_EXEC_GUARD_DEBUG=1)"
+cli-qemu-help: "what to do when a qemu-user emulator is detected (env AOSC_EXEC_GUARD_QEMU; defaults to the saved choice)"
+cli-handover-help: "step aside so the kernel's qemu entries handle foreign binaries (--handover=off to restore)"
+cli-yes-help: "skip the confirmation prompt (required when non-interactive; only meaningful with --handover)"
+cli-help-help: "Print help"
+cli-version-help: "Print version"
