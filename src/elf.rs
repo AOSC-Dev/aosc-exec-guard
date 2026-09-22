@@ -87,21 +87,23 @@ pub fn native_machine() -> Option<u16> {
     })
 }
 
+/// e_machine → 名字。名字会嵌进中英文两种句子里（见 `arch_sentence` /
+/// `native-but-rejected`），所以里面的括号一律用半角：全角括号在 en 下很扎眼。
 pub fn machine_name(machine: u16) -> Option<&'static str> {
     Some(match machine {
         0x02 => "SPARC",
-        0x03 => "i386（x86）",
+        0x03 => "i386 (x86)",
         0x04 => "m68k",
         0x08 => "MIPS",
-        0x12 => "SPARC32PLUS（SPARC V8+）",
+        0x12 => "SPARC32PLUS (SPARC V8+)",
         0x14 => "PowerPC",
         0x15 => "PowerPC 64",
         0x16 => "s390x",
         0x28 => "ARM",
         0x2a => "SuperH",
-        0x2b => "SPARC64（SPARC v9）",
+        0x2b => "SPARC64 (SPARC v9)",
         0x3e => "x86_64",
-        0xb7 => "aarch64（ARM64）",
+        0xb7 => "aarch64 (ARM64)",
         0xf3 => "RISC-V",
         0x102 => "LoongArch",
         0x9026 => "Alpha",
