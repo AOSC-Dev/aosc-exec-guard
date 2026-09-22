@@ -234,7 +234,7 @@ test: build
     printf '%s\nexit=%s\n' "$out" "$code"
     [ "$code" -eq 42 ] || fail "no tty and no GUI: the stub qemu should have run, got $code"
 
-    step 'qemu: terminal prompt (pty): y / n / a / s'
+    step 'qemu: terminal menu (pty, dialoguer): 运行 / 不运行 / 总是 / 从不'
     cat > "$TMP/bin/ask-guard" <<EOF
     #!/usr/bin/env bash
     export HOME="$PWD/$TMP/home" AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/binfmt" AOSC_EXEC_GUARD_QEMU=ask
@@ -242,31 +242,35 @@ test: build
     exec "$GUARD" "\$@"
     EOF
     chmod +x "$TMP/bin/ask-guard"
-    ask_pty() { # $1 = answer; sets $out and $code, config file is removed first
+    ask_pty() { # $1 = 按键（j/k 上下移动，回车确认）；sets $out and $code
       rm -f "$PWD/$TMP/home/.config/aosc-exec-guard.conf"
       set +e
-      printf '%s\n' "$1" | script -qec "$PWD/$TMP/bin/ask-guard $TMP/aarch64.elf" /dev/null \
+      printf '%b' "$1" | script -qec "$PWD/$TMP/bin/ask-guard $TMP/aarch64.elf" /dev/null \
         > "$TMP/pty.out" 2>&1
       code=$?
       set -e
       out=$(tr -d '\r' < "$TMP/pty.out")
       printf '%s\n' "$out"
-      printf 'answer=%s exit=%s\n' "$1" "$code"
+      printf 'keys=%s exit=%s\n' "$1" "$code"
     }
-    ask_pty y
-    [ "$code" -eq 42 ] || fail "answering y should run the stub qemu, got $code"
-    case "$out" in *'stub-qemu'*) ;; *) fail 'the prompt should lead to the stub qemu' ;; esac
-    ask_pty n
-    [ "$code" -eq 126 ] || fail "answering n should explain and exit 126, got $code"
+    ask_pty '\n'   # 默认项是“不运行（这次）”
+    [ "$code" -eq 126 ] || fail "the default item should explain and exit 126, got $code"
     case "$out" in *'无法运行'*) ;; *) fail 'declining should print the explanation' ;; esac
-    ask_pty a
-    [ "$code" -eq 42 ] || fail "answering a should run the stub qemu, got $code"
+    case "$out" in *'总是运行（不再询问）'*) ;; *) fail 'the dialoguer menu should have been drawn' ;; esac
+    ask_pty 'k\n'  # 上移一项 → 运行（这次）
+    [ "$code" -eq 42 ] || fail "choosing “run once” should run the stub qemu, got $code"
+    case "$out" in *'stub-qemu'*) ;; *) fail 'the menu should lead to the stub qemu' ;; esac
+    ask_pty 'j\n'  # 下移一项 → 总是运行（不再询问）
+    [ "$code" -eq 42 ] || fail "choosing “always run” should run the stub qemu, got $code"
     grep -q 'qemu = always' "$PWD/$TMP/home/.config/aosc-exec-guard.conf" \
-      || fail 'answering a should remember “always run”'
-    ask_pty s
-    [ "$code" -eq 126 ] || fail "answering s should explain and exit 126, got $code"
+      || fail 'choosing “always run” should be remembered'
+    ask_pty 'jj\n' # 再下移一项 → 总是不运行（不再询问）
+    [ "$code" -eq 126 ] || fail "choosing “never run” should explain and exit 126, got $code"
     grep -q 'qemu = never' "$PWD/$TMP/home/.config/aosc-exec-guard.conf" \
-      || fail 'answering s should remember “never run”'
+      || fail 'choosing “never run” should be remembered'
+    ask_pty 'q'    # q 退出菜单 = 这次不运行（不记住）
+    [ "$code" -eq 126 ] || fail "quitting the menu should explain and exit 126, got $code"
+    [ ! -e "$PWD/$TMP/home/.config/aosc-exec-guard.conf" ] || fail 'quitting must not be remembered'
 
     step 'qemu: GUI checkbox (stub zenity) is only remembered when ticked'
     rm -f "$PWD/$TMP/home/.config/aosc-exec-guard.conf"

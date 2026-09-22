@@ -7,7 +7,8 @@
 //! It parses the ELF header, prints a human-readable explanation to stderr and
 //! optionally shows a dialog (zenity/kdialog) when it was launched from a
 //! graphical session. When a matching qemu-user binfmt entry is installed it can
-//! also offer to run the program through the emulator instead (see `--qemu`).
+//! also offer to run the program through the emulator instead — a GUI dialog, or
+//! a menu on the terminal (see `--qemu`).
 //! It exits with status 126, matching the shell convention for "cannot execute"
 //! errors.
 
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use clap::{Parser, ValueEnum};
+use dialoguer::{Select, console::Term};
 
 /// Exit status for "found but cannot be executed" (shell convention).
 const EXIT_CANNOT_EXEC: i32 = 126;
@@ -537,31 +539,42 @@ fn ask_outcome(output: &Output) -> Option<AskOutcome> {
     }
 }
 
-/// 终端询问；stdin 不是终端时返回 None（不打扰用户）。
+/// 终端询问：用 dialoguer 画一个上下键选择的菜单。
+/// stdin 读不了键、或 stderr 画不出菜单时返回 None（不打扰用户）。
 fn ask_terminal(entry: &QemuEntry, target: &Path, info: &ElfInfo) -> Option<AskOutcome> {
-    if !std::io::stdin().is_terminal() {
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return None;
     }
     eprintln!("aosc-exec-guard: {}", qemu_question(target, info));
-    eprintln!(
-        "aosc-exec-guard: 用 {} 运行吗？[y/N]（a=总是运行，s=总是不运行）",
-        entry.name
-    );
-    let mut answer = String::new();
-    let _ = std::io::stdin().read_line(&mut answer);
-    Some(match answer.trim() {
-        "y" | "Y" => AskOutcome {
+
+    // 以前是 [y/N/a/s]；现在同样的四个答案摆成菜单，默认项仍是“不运行”（和 y/N 一致）。
+    let items = [
+        "运行（这次）",
+        "不运行（这次）",
+        "总是运行（不再询问）",
+        "总是不运行（不再询问）",
+    ];
+    let choice = Select::new()
+        .with_prompt(format!("用 {} 运行吗", entry.name))
+        .items(items)
+        .default(1)
+        .report(true)
+        .interact_on_opt(&Term::stderr());
+
+    Some(match choice {
+        Ok(Some(0)) => AskOutcome {
             run: true,
             remember: false,
         },
-        "a" | "A" => AskOutcome {
+        Ok(Some(2)) => AskOutcome {
             run: true,
             remember: true,
         },
-        "s" | "S" => AskOutcome {
+        Ok(Some(3)) => AskOutcome {
             run: false,
             remember: true,
         },
+        // 1 = “不运行（这次）”；q/Esc 退出、读键失败也都当这次不运行。
         _ => AskOutcome {
             run: false,
             remember: false,

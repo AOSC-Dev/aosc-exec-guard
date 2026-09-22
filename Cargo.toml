@@ -16,6 +16,9 @@ clap = { version = "4", default-features = false, features = [
     "suggestions",
     "derive",
 ] }
+# Terminal prompt menu for the qemu offer; the editor/password helpers are
+# not needed, so the default features stay off.
+dialoguer = { version = "0.12", default-features = false }
 
 [profile.release]
 strip = true
