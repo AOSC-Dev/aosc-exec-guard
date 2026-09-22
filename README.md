@@ -183,6 +183,8 @@ $ sudo aosc-exec-guard --handover        # 问一句确认；脚本里可以加 
 
 guard 就**把自己从路径里拿掉**：注销全部 `aosc-exec-guard-*` 条目，并把 `/usr/lib/binfmt.d/zz-aosc-exec-guard.conf` 改名成 `.disabled`（systemd-binfmt 只认 `.conf`，重启也不会再注册）。之后外架构程序由内核的 qemu 条目直接处理，宿主机、chroot、容器 行为统一，上面那些“不能”的格子全部消失。恢复：`sudo aosc-exec-guard --handover=off`（会重启 systemd-binfmt 重新注册），或者重新跑安装脚本。
 
+让位这一侧**不需要、也刻意不重启 systemd-binfmt**：内核条目是当场注销的（exec 时才查表，立刻生效），conf 改名后 systemd-binfmt 再怎么重启也只会注册 `qemu-*`，不会把 guard 拉回来。反过来，restart 的 stop 阶段会注销**所有**条目，start 若被 systemd 的启动频率限制挡住就一个都不剩（`--handover=off` 和安装脚本里都先 `reset-failed` 就是为了这个）——让位的全部意义是“让 qemu 接管”，不能拿这个去赌。需要 restart 的只有恢复（`--handover=off`，跑完还会验证条目真的回来了）、重装（安装脚本会删掉 `.disabled` 再重启）和手工改了别的 conf 想立刻生效这几种情况。
+
 代价要说清楚：**让位之后 guard 的询问和解释都不会再出现**；之前选过“总是不运行”的用户，那个选择也随之失效（guard 都不在了）。注册表里没有可用的 `qemu-*` 条目时，它会先警告——让位后外架构程序会直接以 `Exec format error` 失败，没人解释也没人模拟。
 
 只能在**宿主机（外面）**上做：chroot 里（注册表属于宿主机、配置文件属于 chroot）、容器里（PID namespace）都会拒绝并提示到外面跑。测试可以用 `AOSC_EXEC_GUARD_CONF_DIRS` 把它指到别的目录（同时会在测试模式里跳过 systemctl）。
