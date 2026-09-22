@@ -66,7 +66,7 @@ pub struct QemuEntry {
 pub fn find_qemu_entry(info: &ElfInfo) -> Option<QemuEntry> {
     let dir = binfmt_dir();
     // 注册表能读到就以它为准：没注册、被禁用的条目不该被绕过。
-    if binfmt_registry_visible(&dir) {
+    if registry_visible() {
         return find_qemu_entry_in(&dir, info);
     }
     // 看不到注册表（chroot / 容器里很常见）：能找到能用的模拟器就行。
@@ -75,11 +75,17 @@ pub fn find_qemu_entry(info: &ElfInfo) -> Option<QemuEntry> {
 
 /// 本进程能看到 binfmt_misc 注册表吗——挂载点里有 `register` 文件才算数。
 ///
-/// 注意：没挂 binfmt_misc 时，procfs 里也会有 `/proc/sys/fs/binfmt_misc` 这个
-/// 空目录（chroot 里挂了 /proc 就是这样），所以不能只看目录在不在。
-fn binfmt_registry_visible(dir: &Path) -> bool {
-    // 测试钩子指定了目录就沿用“注册表可见”的语义。
-    env::var_os("AOSC_EXEC_GUARD_BINFMT_DIR").is_some() || dir.join("register").exists()
+/// 看不到就意味着“不知道内核会怎么处理这个文件”（chroot / 容器里没挂、或者
+/// 宿主就没挂），调用方据此决定是否要询问用户（见 config::resolve_qemu_mode）。
+pub fn registry_visible() -> bool {
+    let dir = binfmt_dir();
+    // 测试钩子：指定了目录就以它为准（指到不存在的目录 = 看不到注册表）。
+    // 注意：没挂 binfmt_misc 时，procfs 里也会有 `/proc/sys/fs/binfmt_misc` 这个
+    // 空目录（chroot 里挂了 /proc 就是这样），所以默认看的是 `register` 文件。
+    match env::var_os("AOSC_EXEC_GUARD_BINFMT_DIR") {
+        Some(_) => dir.exists(),
+        None => dir.join("register").exists(),
+    }
 }
 
 fn find_qemu_entry_in(dir: &Path, info: &ElfInfo) -> Option<QemuEntry> {

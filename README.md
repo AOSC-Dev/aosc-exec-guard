@@ -118,11 +118,11 @@ binfmt_misc 条目是**宿主**注册的（严格说，是**用户命名空间**
 
 ### guard 在 chroot 里“让位”（默认行为）
 
-guard 认得自己在不在 chroot（比较 `/` 与 `/proc/1/root`；`AOSC_EXEC_GUARD_FORCE_CHROOT=1` 是测试钩子），在 chroot 里它的行为刻意和宿主机不同——**宿主机上的选择不该带进 rootfs**：
+guard 认得自己在不在 chroot（比较 `/` 与 `/proc/1/root`）；**看不到 binfmt_misc 注册表时也一并按“让位”处理**（没挂 /proc 的 chroot、容器里就是这样）：那时既没法可靠判断自己在哪，也没法知道内核会怎么处理这个文件。这些环境里它的行为刻意和宿主机不同——**宿主机上的选择、以及“要不要问”本身，都不该带进来**：
 
-- **不问、不带宿主机配置**：忽略 `~/.config/aosc-exec-guard.conf` 里“不再询问”记住的选择（即使那个文件看得见），也不弹询问框；默认直接交给模拟器，让 chroot 里的行为等于**没装 guard 时的行为**。
+- **不问、不带宿主机配置**：忽略 `~/.config/aosc-exec-guard.conf` 里“不再询问”记住的选择（即使那个文件看得见），也不弹询问框（终端里也不会出菜单）；默认直接交给模拟器，让环境里的行为等于**没装 guard 时的行为**。
 - **找不到就解释**（并提示“模拟器在本 rootfs 里要能找到”）。
-- 命令行 `--qemu=never|always|ask` 和 `AOSC_EXEC_GUARD_QEMU` 仍然算数：是你显式下的指令，不会被忽略。
+- 命令行 `--qemu=never|always|ask` 和 `AOSC_EXEC_GUARD_QEMU` 仍然算数：是你显式下的指令，不会被忽略（想在没挂 /proc 的 chroot 里手动要个菜单，就显式写 `--qemu=ask`）。
 
 找不到 binfmt_misc 注册表时（chroot 里很常见），guard 按这个顺序找模拟器：
 
@@ -130,7 +130,9 @@ guard 认得自己在不在 chroot（比较 `/` 与 `/proc/1/root`；`AOSC_EXEC_
 2. **宿主机的注册表**：`/proc/1/root/proc/sys/fs/binfmt_misc`——`F` 语义下内核用的就是宿主机那份解释器，照着它转发最忠实（需要 /proc 和权限）；
 3. rootfs 里的**约定路径** `/usr/bin/qemu-<架构>[-static]`（qemu-debootstrap 式玩法；没有条目可读时按最常见的参数布局转发）。
 
-于是 chroot 里的体验：rootfs 里有模拟器（或宿主机条目可用）→ 外架构程序照常跑；都没有 → guard 解释原因。
+于是 chroot 里的体验：rootfs 里有模拟器（或宿主机条目可用）→ 外架构程序照常跑；都没有 → guard 解释原因（并提示该把模拟器放到哪）。
+
+一个诚实的残留：**既没挂 /proc、rootfs 里又没有任何模拟器**的 chroot（比如 `chroot /mnt/xx /bin/sh` 这种临时进去看看的用法）——这种 chroot 里内核本来会用宿主机那份 `F` 解释器把程序跑起来，但 guard 接住后，因为 /proc 不在、rootfs 里也没有模拟器，**没有任何可达的路径可以转发**，只能解释（退 126）。想让这种 chroot 也正常工作，就在 rootfs 里放一份静态 `qemu-*-static`（或静态 guard，见下）。
 
 自己的构建怎么选：
 
@@ -155,7 +157,7 @@ $ ldd target/release/aosc-exec-guard   # 照着把 ld.so 和各库拷到 rootfs 
 2. 注册后立刻用 `/usr/bin/true` 冒烟：本机程序必须还能跑，否则立即中止并清理；
 3. 同时保留 `qemu-aarch64` 条目，观察两者谁先匹配（注册顺序语义实测）；
 4. 暂时禁用 `qemu-aarch64`，跑一个伪造的 aarch64 ELF 和（若已下载）真实 busybox，检查解释文本与退出码 126；
-5. chroot 一遍：宿主条目照样命中（`F` 让内核用注册时打开的解释器；动态解释器还差 rootfs 里的 ld.so → ENOENT），补上库后能解释、认出 chroot 并改提示；rootfs 里有约定路径的模拟器、或能从 `/proc/1/root` 借到宿主机条目时，直接让位转发；
+5. chroot 一遍：宿主条目照样命中（`F` 让内核用注册时打开的解释器；动态解释器还差 rootfs 里的 ld.so → ENOENT），补上库后能解释、认出 chroot 并改提示；rootfs 里有约定路径的模拟器、或能从 `/proc/1/root` 借到宿主机条目时，直接让位转发（真程序 busybox 也跑一遍）；
 6. 把 `AOSC_EXEC_GUARD_QEMU=always` 交给真实的 `binfmt_misc` 调用链，让 busybox 经 guard → qemu 跑起来（`uname -m` 输出 aarch64）；
 7. 恢复 `qemu-aarch64`、注销 guard，确认原来的模拟器行为回来。
 

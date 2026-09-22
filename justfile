@@ -362,6 +362,24 @@ test: build
     [ "$code" -eq 126 ] || fail "宿主机上保存的选择仍然有效，got $code"
     rm -f "$PWD/$TMP/home/.config/aosc-exec-guard.conf"
 
+    step 'qemu: 看不到注册表（没挂 /proc 的 chroot、容器）时不询问'
+    # 没挂 binfmt_misc 时没法可靠判断自己在哪，也没法知道内核会怎么处理：
+    # 按“让位”处理——不弹菜单，直接用约定路径的模拟器（宿主机上真装了这个）。
+    if [ -x /usr/bin/qemu-aarch64-static ]; then
+      set +e
+      printf '\n' | script -qec "env -u DISPLAY -u WAYLAND_DISPLAY -u INVOCATION_ID -u XDG_CONFIG_HOME HOME=$PWD/$TMP/home AOSC_EXEC_GUARD_BINFMT_DIR=$PWD/$TMP/no-such-dir $GUARD $TMP/aarch64.elf" /dev/null \
+        > "$TMP/pty2.out" 2>&1
+      code=$?
+      set -e
+      out=$(tr -d '\r' < "$TMP/pty2.out")
+      printf '%s\nexit=%s\n' "$out" "$code"
+      case "$out" in *'运行（这次）'*) fail '看不到注册表时不该弹询问菜单' ;; esac
+      [ "$code" -ne 126 ] || fail '应该直接交给模拟器，而不是只解释（126）'
+      case "$out" in *qemu*) ;; *) fail '应当看到 qemu 的输出' ;; esac
+    else
+      echo '（宿主机没有 /usr/bin/qemu-aarch64-static：跳过这一分支）'
+    fi
+
     if [ -x "$TMP/busybox-aarch64" ]; then
       step 'direct: real aarch64 binary (Alpine busybox-static) → explain'
       set +e
@@ -549,6 +567,21 @@ kernel-test:
     printf '%s\nexit=%s\n' "$out" "$code"
     [ "$code" -eq 0 ] || fail "chroot 里发现 /usr/bin/qemu-aarch64-static 就该直接转发（应退 0），实际 $code"
     rm -f "$CHR/usr/bin/qemu-aarch64-static"
+
+    # 同一分支的真程序版：真模拟器 + busybox-static，没挂 /proc 也不询问
+    if [ -x "$TMP/busybox-aarch64" ] && [ -x /usr/bin/qemu-aarch64-static ]; then
+      step 'chroot：真程序（busybox）经 rootfs 里的模拟器跑起来'
+      install -Dm755 /usr/bin/qemu-aarch64-static "$CHR/usr/bin/qemu-aarch64-static"
+      cp "$TMP/busybox-aarch64" "$CHR/busybox"
+      set +e
+      out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR" /busybox uname -m 2>&1)
+      code=$?
+      set -e
+      printf '%s\nexit=%s\n' "$out" "$code"
+      [ "$code" -eq 0 ] || fail "busybox 应该经 rootfs 里的模拟器跑起来，实际 $code"
+      case "$out" in *aarch64*) ;; *) fail 'busybox 的 uname -m 应输出 aarch64' ;; esac
+      rm -f "$CHR/usr/bin/qemu-aarch64-static" "$CHR/busybox"
+    fi
 
     # 兜底二：借宿主机的注册表（/proc/1/root）——F 条目下内核用的就是宿主机那份
     if [ "$QEMU_WAS_ENABLED" = yes ] && [ -x /usr/bin/qemu-aarch64-static ]; then

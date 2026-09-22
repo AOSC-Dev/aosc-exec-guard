@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use clap::ValueEnum;
 
 use crate::platform::in_chroot;
+use crate::qemu::registry_visible;
 
 /// 检测到匹配的 qemu-user 条目时怎么办。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -29,8 +30,9 @@ pub fn parse_qemu_mode(value: &str) -> Option<QemuMode> {
 
 /// 优先级：命令行 > 环境变量 > 用户配置（“不再询问”记住的选择）。
 ///
-/// chroot 里是个例外：宿主机保存的选择（以及“询问”本身）不该带进 rootfs，
-/// 默认直接交给模拟器——这样 chroot / 容器里就和没装 guard 时一样（让位）。
+/// chroot 里是个例外，而且“看不到 binfmt_misc 注册表”时也一样（没挂 /proc 的
+/// chroot、容器里都算——那时根本没有可靠办法判断自己在哪）：不问、也不带
+/// 宿主机保存的选择，默认直接交给模拟器，行为就跟没装 guard 时一样（让位）。
 pub fn resolve_qemu_mode(cmdline: Option<QemuMode>) -> QemuMode {
     if let Some(mode) = cmdline {
         return mode;
@@ -40,7 +42,7 @@ pub fn resolve_qemu_mode(cmdline: Option<QemuMode>) -> QemuMode {
     {
         return mode;
     }
-    if in_chroot() {
+    if in_chroot() || !registry_visible() {
         return QemuMode::Always;
     }
     load_saved_qemu_mode().unwrap_or(QemuMode::Ask)
