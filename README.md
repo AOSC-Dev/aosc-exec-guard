@@ -30,7 +30,7 @@
   :aosc-exec-guard-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/aosc-exec-guard:F
   ```
 
-  **装不到本机架构的规则上去**（会劫持解释器自身 → `ELOOP` → 全系统起不了新程序），但不用手工去删：`scripts/install.sh` 按 qemu 的 `qemu-binfmt-conf.sh` **同一套“家族”表**过滤（amd64 上删 i386+x86_64、aarch64 上删 arm+aarch64、mips64 上删 mips 一族…），装到 `/usr` 后还会拿 `/usr/bin/true` 做 exec 冒烟测试，万一过滤漏了它会用内建命令立刻撤销并报错。所以**一份 conf 就够，不需要为每个目标架构各存一份**；打成包时用 `scripts/install.sh --prefix <目录>`（交叉打包加 `--host-arch`）。
+  **装不到本机架构的规则上去**（会劫持解释器自身 → `ELOOP` → 全系统起不了新程序），但不用手工去删：`just install` 按 qemu 的 `qemu-binfmt-conf.sh` **同一套“家族”表**过滤（amd64 上删 i386+x86_64、aarch64 上删 arm+aarch64、mips64 上删 mips 一族…），装到 `/usr` 后还会拿 `/usr/bin/true` 做 exec 冒烟测试，万一过滤漏了它会用内建命令立刻撤销并报错。所以**一份 conf 就够，不需要为每个目标架构各存一份**；打成包时用 `just install <目录>`（交叉打包再加一个目标架构参数，见 `just --list`）。
 - `aosc-exec-guard` 的工作：
   - 读 ELF 头（只读前 20 字节），区分三种情况：外来架构 / 本机架构（本不该被条目命中，防呆）/ 根本不是 ELF；
   - 输出解释到 stderr；如果是从图形会话启动（有 `DISPLAY`/`WAYLAND_DISPLAY`，且 stdout/stderr 都不是终端，也不是 systemd 服务），再调 `zenity`/`kdialog` 弹框；
@@ -47,43 +47,46 @@
 
 ```
 src/main.rs                  guard 本体（Rust；只用 clap 做命令行解析）
-data/binfmt.d/zz-aosc-exec-guard.conf.in  规则模板（全集，22 条，抄自 qemu）；安装时由 install.sh 过滤成 /usr/lib/binfmt.d/zz-aosc-exec-guard.conf
-scripts/test.sh              本地测试（无 root）：单测 + 直测 + stub zenity 弹框 / stub qemu 的询问转发分支 + installer
-scripts/install.sh           安装/卸载（按本机家族过滤规则；--prefix 供打包，--host-arch 供交叉打包）
-scripts/get-test-binary.sh   下载真实的 aarch64 静态二进制（Alpine busybox-static）
-scripts/kernel-test.sh       内核端到端测试（需要 root，自动清理/恢复）
-scripts/systemd-install-test.sh 真实安装路径测试（/usr/lib/binfmt.d/ + systemd-binfmt，需要 root）
+justfile                     开发/测试/安装入口（just / just test / sudo just install …）
+data/binfmt.d/zz-aosc-exec-guard.conf.in  规则模板（全集，22 条，抄自 qemu）；安装时由 just install 过滤成 /usr/lib/binfmt.d/zz-aosc-exec-guard.conf
 ```
 
 ## 使用
 
-本地测试（不需要 root）：
+本地检查（不需要 root）：
 
 ```console
-$ scripts/test.sh
+$ just                    # 列出全部配方
+$ just test               # 单测 + 直接调用 + stub 弹框/仿真器 + installer
 ```
 
 装到系统（需要 root；会重启 systemd-binfmt 并做 exec 冒烟测试，失败自动撤销）：
 
 ```console
-$ sudo scripts/install.sh
+$ sudo just install
 # 卸载
-$ sudo scripts/install.sh --uninstall
+$ sudo just uninstall
 # 打包/暂存目录（不碰内核）
-$ scripts/install.sh --prefix /tmp/pkg            # 目标就是本机架构
-$ scripts/install.sh --prefix /tmp/pkg --host-arch aarch64   # 交叉打包
+$ just install /tmp/pkg                  # 目标就是本机架构
+$ just install /tmp/pkg aarch64          # 交叉打包指定目标架构
 ```
 
 可选的真实 aarch64 二进制：
 
 ```console
-$ scripts/get-test-binary.sh   # 然后重跑 scripts/test.sh
+$ just get-test-binary   # 然后重跑 just test
 ```
 
-内核端到端测试（注册 binfmt 条目；脚本结束时会自动注销并恢复 qemu 条目）：
+内核端到端测试（注册 binfmt 条目；结束时会自动注销并恢复 qemu 条目）：
 
 ```console
-$ scripts/test.sh && sudo scripts/kernel-test.sh
+$ just test && sudo just kernel-test
+```
+
+真实安装路径测试（把 conf 装进 `/usr/lib/binfmt.d/`、由 systemd-binfmt 应用，同样自动清理）：
+
+```console
+$ sudo just systemd-install-test
 ```
 
 如果脚本被强杀导致条目残留（只会影响 aarch64 文件的执行，重启也会清掉），手动清理：
@@ -107,7 +110,7 @@ $ rm -f ~/.config/aosc-exec-guard.conf
 5. 把 `AOSC_EXEC_GUARD_QEMU=always` 交给真实的 `binfmt_misc` 调用链，让 busybox 经 guard → qemu 跑起来（`uname -m` 输出 aarch64）；
 6. 恢复 `qemu-aarch64`、注销 guard，确认原来的模拟器行为回来。
 
-`scripts/systemd-install-test.sh` 另走"真实安装路径"：把 conf 装进 `/usr/lib/binfmt.d/`（解释器指向本仓库构建的二进制）、由 `systemd-binfmt` 应用，再清空条目按文件名顺序重放一遍看优先级，最后移除 conf。
+`just systemd-install-test` 另走"真实安装路径"：把 conf 装进 `/usr/lib/binfmt.d/`（解释器指向本仓库构建的二进制）、由 `systemd-binfmt` 应用，再清空条目按文件名顺序重放一遍看优先级，最后移除 conf。
 
 ## 已知问题 / 待办
 
@@ -125,7 +128,7 @@ $ rm -f ~/.config/aosc-exec-guard.conf
 6. **打包注意**：conf 带 `F` 标志 → 注册时解释器文件必须已存在（试过不存在的路径，服务直接报 `No such file or directory` 注册失败）；二进制和 conf 在同一包里安装没问题。
 7. **端到端行为**：伪造和真实的 aarch64 ELF 都被 guard 接管（中文解释 + 退出码 126）；禁用/恢复 qemu、条目清理均验证通过。
 8. **一个 conf 文件可以放多条规则**：`man binfmt.d` 原文是 "Each file contains a list of binfmt_misc kernel binary format rules"，systemd-binfmt 逐行注册、`#`/`;` 开头的注释行忽略（实测：一个文件里两行规则同时注册成功，删掉文件重启后对应条目消失）。
-9. **本机架构怎么排除**：不需要为每个目标架构各存一份 conf。qemu 上游（`qemu-binfmt-conf.sh`）是按 CPU **家族**过滤的——i386+x86_64 一族、arm+aarch64 一族、mips 全族、ppc/ppc64 一族、sparc 全族等，`--ignore-family yes` 用于同家族但本机跑不了的目标（如 riscv64 上的 riscv32）；`scripts/install.sh` 抄的就是这套表，实测：本机 x86_64 装完剩 20 条（去掉 i386+x86_64），`--host-arch aarch64` 则去掉 arm+aarch64、保留 x86_64。
+9. **本机架构怎么排除**：不需要为每个目标架构各存一份 conf。qemu 上游（`qemu-binfmt-conf.sh`）是按 CPU **家族**过滤的——i386+x86_64 一族、arm+aarch64 一族、mips 全族、ppc/ppc64 一族、sparc 全族等，`ignore-family=yes`（`just install` 的第三个参数）对应 qemu 的同名选项：同家族但本机跑不了的目标，如 riscv64 上的 riscv32。`just install` 抄的就是这套表，实测：本机 x86_64 装完剩 20 条（去掉 i386+x86_64），目标换成 aarch64 则去掉 arm+aarch64、保留 x86_64。
 
 ## 踩坑记录（2026-09-22，实测）
 
