@@ -72,7 +72,7 @@ show_file "$BM/status"
 
 step "注册 guard 条目（interpreter=$GUARD）"
 [ -e "$ENTRY" ] && echo -1 > "$ENTRY"
-line=$(grep -F ':aosc-exec-guard-aarch64:' data/binfmt.d/zz-aosc-exec-guard.conf)
+line=$(grep -F ':aosc-exec-guard-aarch64:' data/binfmt.d/zz-aosc-exec-guard.conf.in)
 line=${line//\/usr\/bin\/aosc-exec-guard/$GUARD}
 printf '%s\n' "$line" > "$BM/register"
 show_file "$ENTRY"

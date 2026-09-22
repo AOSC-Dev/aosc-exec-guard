@@ -1,4 +1,8 @@
-# aosc-exec-guard：外来架构 ELF 的 binfmt_misc 规则（装到 /usr/lib/binfmt.d/）。
+# aosc-exec-guard：外来架构 ELF 的 binfmt_misc 规则**模板**（.conf.in）。
+#
+# 这里是规则全集，给 scripts/install.sh 用：安装时会按本机家族删掉相应规则，生成
+# /usr/lib/binfmt.d/zz-aosc-exec-guard.conf（systemd-binfmt 只认 .conf，本来也不会读
+# 这个 .in；但别手工把它改名装上去——里面带着本机架构的规则）。
 #
 # 规则里前 20 条逐字节抄自 AOSC OS 的 qemu-user 包（/usr/lib/binfmt.d/qemu-*.conf），
 # i386/x86_64 两条按同一模板补上（qemu 上游有，本机因为是 x86_64 被它的安装器过滤掉了）

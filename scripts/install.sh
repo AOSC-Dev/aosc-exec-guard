@@ -15,7 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CONF_SRC=$PWD/data/binfmt.d/zz-aosc-exec-guard.conf
+CONF_SRC=$PWD/data/binfmt.d/zz-aosc-exec-guard.conf.in
 BIN_SRC=$PWD/target/release/aosc-exec-guard
 
 PREFIX=/usr

@@ -867,9 +867,10 @@ mod tests {
         // 一一对应，否则“发现可用的仿真器”这条路径会失效。
         let conf = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/data/binfmt.d/zz-aosc-exec-guard.conf"
+            "/data/binfmt.d/zz-aosc-exec-guard.conf.in"
         );
-        let text = std::fs::read_to_string(conf).expect("读 data/binfmt.d/zz-aosc-exec-guard.conf");
+        let text =
+            std::fs::read_to_string(conf).expect("读 data/binfmt.d/zz-aosc-exec-guard.conf.in");
 
         let mut rules = 0;
         for line in text.lines().map(str::trim) {

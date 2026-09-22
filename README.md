@@ -13,10 +13,12 @@
 - 所以本仓库是"一个架构一条规则"，但都是**一个** conf 文件里的一行（`man binfmt.d`：一个文件就是"一串规则"，systemd-binfmt 逐行注册，注释行 `#`/`;` 忽略——实测有效）：
 
   ```
-  data/binfmt.d/zz-aosc-exec-guard.conf   # 22 条规则：i386/x86_64/aarch64/arm/armeb/riscv64/loongarch64/
-                                          #   mips{,64el,el}/ppc{,64,64le}/s390x/sh4{,eb}/
-                                          #   sparc{,32plus,64}/alpha/m68k/microblaze
+  data/binfmt.d/zz-aosc-exec-guard.conf.in   # 规则模板（全集，22 条）：i386/x86_64/aarch64/arm/armeb/
+                                             #   riscv64/loongarch64/mips{,64el,el}/ppc{,64,64le}/s390x/
+                                             #   sh4{,eb}/sparc{,32plus,64}/alpha/m68k/microblaze
   ```
+
+  后缀是 `.in` 故意的：它是**模板**（systemd-binfmt 只认 `.conf`，不会误读），安装脚本按目标架构过滤后生成真正的 `zz-aosc-exec-guard.conf`。
 
   规则里的 magic/mask **逐字节抄自 AOSC OS 的 qemu-user 包**（`/usr/lib/binfmt.d/qemu-*.conf`，20 条），i386/x86_64 两条按同一模板补上（qemu 上游也有，本机因为是 x86_64 被它自己的安装器过滤掉了）——集合要全，别的主机才能拿它解释 amd64 程序。以后要覆盖新架构，从 qemu 的 conf/上游脚本里再抄一行即可。
 
@@ -45,7 +47,7 @@
 
 ```
 src/main.rs                  guard 本体（Rust；只用 clap 做命令行解析）
-data/binfmt.d/zz-aosc-exec-guard.conf  /usr/lib/binfmt.d/ 用的注册项（一个文件，20 条按架构的规则，抄自 qemu）
+data/binfmt.d/zz-aosc-exec-guard.conf.in  规则模板（全集，22 条，抄自 qemu）；安装时由 install.sh 过滤成 /usr/lib/binfmt.d/zz-aosc-exec-guard.conf
 scripts/test.sh              本地测试（无 root）：单测 + 直测 + stub zenity 弹框 / stub qemu 的询问转发分支 + installer
 scripts/install.sh           安装/卸载（按本机家族过滤规则；--prefix 供打包，--host-arch 供交叉打包）
 scripts/get-test-binary.sh   下载真实的 aarch64 静态二进制（Alpine busybox-static）
