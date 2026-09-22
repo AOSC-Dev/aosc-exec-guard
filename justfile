@@ -324,6 +324,44 @@ test: build
     [ "$code" -eq 126 ] || fail "--qemu=never should override the saved answer, got $code"
     rm -f "$PWD/$TMP/home/.config/aosc-exec-guard.conf"
 
+    step 'qemu: chroot 里让位（忽略保存的选择、不询问）'
+    # 真 chroot 的用例在 kernel-test；这里用 AOSC_EXEC_GUARD_FORCE_CHROOT 让 guard
+    # 以为自己在 chroot 里。
+    run_chroot() { guard_env "$PWD/$TMP/binfmt" AOSC_EXEC_GUARD_FORCE_CHROOT=1 "$@"; }
+
+    printf 'qemu = never\n' > "$PWD/$TMP/home/.config/aosc-exec-guard.conf"
+    set +e
+    out=$(run_chroot "$GUARD" "$TMP/aarch64.elf" 2>&1)
+    code=$?
+    set -e
+    printf 'chroot + config=never exit=%s\n' "$code"
+    [ "$code" -eq 42 ] || fail "chroot 里应忽略宿主机保存的选择、直接交给模拟器，got $code"
+    case "$out" in *'stub-qemu'*) ;; *) fail 'chroot 里应该转发给 stub qemu' ;; esac
+
+    set +e
+    out=$(run_chroot AOSC_EXEC_GUARD_QEMU=never "$GUARD" "$TMP/aarch64.elf" 2>&1)
+    code=$?
+    set -e
+    printf 'chroot + env=never exit=%s\n' "$code"
+    [ "$code" -eq 126 ] || fail "显式的 AOSC_EXEC_GUARD_QEMU=never 在 chroot 里也该算数，got $code"
+
+    set +e
+    out=$(guard_env "$PWD/$TMP/binfmt-empty" AOSC_EXEC_GUARD_FORCE_CHROOT=1 "$GUARD" "$TMP/aarch64.elf" 2>&1)
+    code=$?
+    set -e
+    printf 'chroot + 没有模拟器 exit=%s\n' "$code"
+    [ "$code" -eq 126 ] || fail "chroot 里找不到模拟器时应解释并退 126，got $code"
+    case "$out" in *chroot*) ;; *) fail 'chroot 里的提示应该提到 chroot' ;; esac
+
+    # 对照：同样的配置在宿主机（不在 chroot）里仍然生效
+    set +e
+    out=$(run_guard_qemu "$TMP/aarch64.elf" 2>&1)
+    code=$?
+    set -e
+    printf 'host + config=never exit=%s\n' "$code"
+    [ "$code" -eq 126 ] || fail "宿主机上保存的选择仍然有效，got $code"
+    rm -f "$PWD/$TMP/home/.config/aosc-exec-guard.conf"
+
     if [ -x "$TMP/busybox-aarch64" ]; then
       step 'direct: real aarch64 binary (Alpine busybox-static) → explain'
       set +e
@@ -501,6 +539,32 @@ kernel-test:
     umount "$CHR/proc"
     printf '%s\nexit=%s\n' "$out" "$code"
     case "$out" in *chroot*) echo '=> guard 认出了 chroot，提示相应改变' ;; *) fail 'chroot 里的提示应该提到 chroot' ;; esac
+
+    # 看不到注册表时的兜底一：rootfs 里有约定路径的模拟器就直接转发（让位）
+    install -Dm755 /usr/bin/true "$CHR/usr/bin/qemu-aarch64-static"
+    set +e
+    out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR" /prog 2>&1)
+    code=$?
+    set -e
+    printf '%s\nexit=%s\n' "$out" "$code"
+    [ "$code" -eq 0 ] || fail "chroot 里发现 /usr/bin/qemu-aarch64-static 就该直接转发（应退 0），实际 $code"
+    rm -f "$CHR/usr/bin/qemu-aarch64-static"
+
+    # 兜底二：借宿主机的注册表（/proc/1/root）——F 条目下内核用的就是宿主机那份
+    if [ "$QEMU_WAS_ENABLED" = yes ] && [ -x /usr/bin/qemu-aarch64-static ]; then
+      step 'chroot：看不到注册表时借宿主机 qemu 条目转发（/proc/1/root）'
+      [ -e "$QEMU_ENTRY" ] && echo 1 > "$QEMU_ENTRY"
+      mount -t proc proc "$CHR/proc"
+      set +e
+      out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR" /prog 2>&1)
+      code=$?
+      set -e
+      umount "$CHR/proc"
+      printf '%s\nexit=%s\n' "$out" "$code"
+      [ "$code" -ne 126 ] || fail 'chroot 里应借宿主机 qemu 条目转发，不该只解释（126）'
+      case "$out" in *qemu*) ;; *) fail '应当看到 qemu 的输出（它会对假 ELF 报错）' ;; esac
+      [ -e "$QEMU_ENTRY" ] && echo 0 > "$QEMU_ENTRY"
+    fi
     rm -rf "${CHR:?}"
 
     # 静态解释器 + F：rootfs 里什么都不放也能跑（qemu-user-static 就是这个组合）

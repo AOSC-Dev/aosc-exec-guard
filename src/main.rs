@@ -248,6 +248,10 @@ fn in_service() -> bool {
 /// 没挂 /proc（读不到 `/proc/1/root`）时无从判断，当作“没在 chroot 里”。
 fn in_chroot() -> bool {
     use std::os::unix::fs::MetadataExt;
+    // 测试钩子：无 root 的测试造不出真 chroot（判据就是 /proc/1/root）。
+    if env_switch("AOSC_EXEC_GUARD_FORCE_CHROOT") {
+        return true;
+    }
     let (Ok(here), Ok(pid1)) = (std::fs::metadata("/"), std::fs::metadata("/proc/1/root")) else {
         return false;
     };
@@ -326,6 +330,9 @@ fn parse_qemu_mode(value: &str) -> Option<QemuMode> {
 }
 
 /// 优先级：命令行 > 环境变量 > 用户配置（“不再询问”记住的选择）。
+///
+/// chroot 里是个例外：宿主机保存的选择（以及“询问”本身）不该带进 rootfs，
+/// 默认直接交给模拟器——这样 chroot / 容器里就和没装 guard 时一样（让位）。
 fn resolve_qemu_mode(cli: &Cli) -> QemuMode {
     if let Some(mode) = cli.qemu {
         return mode;
@@ -334,6 +341,9 @@ fn resolve_qemu_mode(cli: &Cli) -> QemuMode {
         .and_then(|value| value.to_str().and_then(parse_qemu_mode))
     {
         return mode;
+    }
+    if in_chroot() {
+        return QemuMode::Always;
     }
     load_saved_qemu_mode().unwrap_or(QemuMode::Ask)
 }
@@ -432,10 +442,64 @@ struct QemuEntry {
 
 /// 找一个已启用、且解释器还在的 qemu 条目。
 fn find_qemu_entry(info: &ElfInfo) -> Option<QemuEntry> {
+    let dir = binfmt_dir();
+    // 注册表能读到就以它为准：没注册、被禁用的条目不该被绕过。
+    if binfmt_registry_visible(&dir) {
+        return find_qemu_entry_in(&dir, info);
+    }
+    // 看不到注册表（chroot / 容器里很常见）：能找到能用的模拟器就行。
+    find_host_qemu_entry(info).or_else(|| find_conventional_qemu(info))
+}
+
+/// 本进程能看到 binfmt_misc 注册表吗——挂载点里有 `register` 文件才算数。
+///
+/// 注意：没挂 binfmt_misc 时，procfs 里也会有 `/proc/sys/fs/binfmt_misc` 这个
+/// 空目录（chroot 里挂了 /proc 就是这样），所以不能只看目录在不在。
+fn binfmt_registry_visible(dir: &Path) -> bool {
+    // 测试钩子指定了目录就沿用“注册表可见”的语义。
+    env::var_os("AOSC_EXEC_GUARD_BINFMT_DIR").is_some() || dir.join("register").exists()
+}
+
+fn find_qemu_entry_in(dir: &Path, info: &ElfInfo) -> Option<QemuEntry> {
     qemu_entry_names(info).iter().find_map(|name| {
-        let text = std::fs::read_to_string(binfmt_dir().join(name)).ok()?;
+        let text = std::fs::read_to_string(dir.join(name)).ok()?;
         let entry = parse_qemu_entry(name, &text)?;
         entry.interpreter.is_file().then_some(entry)
+    })
+}
+
+/// 宿主机注册表（经由 `/proc/1/root`）：chroot 里条目带 `F` 时，内核执行的就是
+/// 宿主机上那份解释器文件，照着它转发最忠实。读不到（没挂 /proc、权限不够）
+/// 就返回 None，交给下面的约定路径。
+fn find_host_qemu_entry(info: &ElfInfo) -> Option<QemuEntry> {
+    let base = Path::new("/proc/1/root");
+    let dir = base.join("proc/sys/fs/binfmt_misc");
+    qemu_entry_names(info).iter().find_map(|name| {
+        let text = std::fs::read_to_string(dir.join(name)).ok()?;
+        let mut entry = parse_qemu_entry(name, &text)?;
+        // 在 chroot 里得经由 /proc/1/root 才能执行到宿主机那份。
+        entry.interpreter = base.join(entry.interpreter.strip_prefix("/").ok()?);
+        entry.interpreter.is_file().then_some(entry)
+    })
+}
+
+/// 约定路径兜底：rootfs 里放了模拟器（qemu-debootstrap 式玩法）又没有注册表可看时，
+/// 按名字找 `/usr/bin/qemu-<架构>[-static]`。条目里的 flag 无从得知，
+/// 按最常见的布局（不加参数）转发。
+fn find_conventional_qemu(info: &ElfInfo) -> Option<QemuEntry> {
+    qemu_entry_names(info).iter().find_map(|name| {
+        [
+            format!("/usr/bin/{name}-static"),
+            format!("/usr/bin/{name}"),
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+        .map(|interpreter| QemuEntry {
+            name: name.to_string(),
+            interpreter,
+            flags: String::new(),
+        })
     })
 }
 
