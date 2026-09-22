@@ -198,6 +198,13 @@ fn build_message(
                      （ask=每次询问、never=从不运行）。",
                     entry.name
                 ),
+                // 宿主机注册的条目在 chroot 里照样会命中；但 guard 找模拟器时
+                // 必须在 rootfs 里看到那个文件（F 只让内核重用注册时打开的
+                // 解释器文件，guard 转发时 exec 的仍然是路径）。
+                None if in_chroot() => "提示：看起来是在 chroot 里：模拟器在本 rootfs 里要能找到\
+                                        （把静态的 qemu-*-static 拷进 /usr/bin 即可），\
+                                        或者到 chroot 外面运行。"
+                    .to_string(),
                 None => "提示：可以安装对应架构的模拟器（qemu-user-static、box64 等）后重试，\
                          或改用 AOSC OS 原生版本。"
                     .to_string(),
@@ -234,6 +241,17 @@ fn in_terminal() -> bool {
 /// systemd unit context: never block on an interactive dialog.
 fn in_service() -> bool {
     env::var_os("INVOCATION_ID").is_some()
+}
+
+/// 本进程是在 chroot（或 pivot_root）里吗：根目录和 PID 1 的根不是同一个。
+///
+/// 没挂 /proc（读不到 `/proc/1/root`）时无从判断，当作“没在 chroot 里”。
+fn in_chroot() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(here), Ok(pid1)) = (std::fs::metadata("/"), std::fs::metadata("/proc/1/root")) else {
+        return false;
+    };
+    (here.dev(), here.ino()) != (pid1.dev(), pid1.ino())
 }
 
 /// 说明一个程序为何无法在本机运行（binfmt_misc 解释器）。
@@ -545,6 +563,7 @@ fn ask_terminal(entry: &QemuEntry, target: &Path, info: &ElfInfo) -> Option<AskO
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return None;
     }
+
     eprintln!("aosc-exec-guard: {}", qemu_question(target, info));
 
     // 以前是 [y/N/a/s]；现在同样的四个答案摆成菜单，默认项仍是“不运行”（和 y/N 一致）。
@@ -554,6 +573,7 @@ fn ask_terminal(entry: &QemuEntry, target: &Path, info: &ElfInfo) -> Option<AskO
         "总是运行（不再询问）",
         "总是不运行（不再询问）",
     ];
+
     let choice = Select::new()
         .with_prompt(format!("用 {} 运行吗", entry.name))
         .items(items)

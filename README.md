@@ -104,14 +104,42 @@ $ sudo sh -c 'echo -1 > /proc/sys/fs/binfmt_misc/aosc-exec-guard-aarch64'
 $ rm -f ~/.config/aosc-exec-guard.conf
 ```
 
+## chroot / 容器里
+
+binfmt_misc 条目是**宿主**注册的，chroot 隔离不掉它：rootfs 里跑外架构程序，条目照样命中。细节有两层（都实测过）：
+
+- 我们的 conf 和 qemu 的 conf 都带 **`F`（fix binary）**：解释器文件在**注册时**就被打开、之后一直用那个文件，所以解释器**不要求在 rootfs 里存在**。但**静态**解释器才能完全零依赖跑起来——`qemu-user-static` 的 static + `F` 正是这个组合。
+- 动态链接的解释器（现在 `just build` 的产物）还会在 exec 时去 **rootfs** 里找它的 `ld.so`/库，找不到就以 `ENOENT` 收场：shell 报“没有那个文件或目录”（`No such file or directory`），而不是 `Exec format error`——别被这句绕进去。
+- guard 转发给模拟器时 exec 的是条目里的**路径**，所以这个路径要在 rootfs 里存在才行。
+
+于是想在 chroot 里用 guard / 模拟器，有两条路：
+
+```console
+# 路线 1（推荐）：guard 静态构建。装到宿主后 chroot 里零拷贝就有解释；
+# 再往 rootfs 里放一份静态模拟器，询问/转发就都能用。
+$ just build-static     # 输出 target/static/aosc-exec-guard（static-pie）
+$ sudo just install     # 装静态版；或 install -Dm755 target/static/aosc-exec-guard /usr/bin/aosc-exec-guard
+$ sudo install -Dm755 /usr/bin/qemu-aarch64-static /path/to/rootfs/usr/bin/qemu-aarch64-static
+
+# 路线 2：动态构建 + 连库一起拷进 rootfs（LD 和库按 rootfs 的根解析）
+$ ldd target/release/aosc-exec-guard   # 照着把 ld.so 和各库拷到 rootfs 的同一路径
+```
+
+guard 自己也认得这种环境（对比 `/` 和 `/proc/1/root`）：在 chroot 里找不到能用的模拟器时，提示会直接说“模拟器在本 rootfs 里要能找到”，而不是笼统地建议装包。
+
+注意一个交互：**rootfs 里没有模拟器、只靠宿主机条目（F）的 chroot**——qemu 自己接管时能跑（静态 + F），但 guard 一旦接住（`zz-` 优先）又找不到路径，就只解释不运行（126）。这种 chroot 里放一份静态 `qemu-*-static` 即可；不想让 guard 插手就 `AOSC_EXEC_GUARD_QEMU=never`（或把 conf 删掉/改名）。
+
+`just kernel-test` 会真的 chroot 一遍验证这条链路（动态解释器先报 ENOENT、补上库就能正常解释并认出 chroot；有静态构建时，空 rootfs 也能解释）。
+
 ## 内核端到端测试做了什么
 
 1. 先做本机架构防护（本机是 aarch64 就拒绝执行），再注册 `aosc-exec-guard-aarch64` 条目；
 2. 注册后立刻用 `/usr/bin/true` 冒烟：本机程序必须还能跑，否则立即中止并清理；
 3. 同时保留 `qemu-aarch64` 条目，观察两者谁先匹配（注册顺序语义实测）；
 4. 暂时禁用 `qemu-aarch64`，跑一个伪造的 aarch64 ELF 和（若已下载）真实 busybox，检查解释文本与退出码 126；
-5. 把 `AOSC_EXEC_GUARD_QEMU=always` 交给真实的 `binfmt_misc` 调用链，让 busybox 经 guard → qemu 跑起来（`uname -m` 输出 aarch64）；
-6. 恢复 `qemu-aarch64`、注销 guard，确认原来的模拟器行为回来。
+5. chroot 一遍：宿主条目照样命中（`F` 让内核用注册时打开的解释器；动态解释器还差 rootfs 里的 ld.so → ENOENT），补上库或用静态构建后能正常解释、并认出自己在 chroot 里；
+6. 把 `AOSC_EXEC_GUARD_QEMU=always` 交给真实的 `binfmt_misc` 调用链，让 busybox 经 guard → qemu 跑起来（`uname -m` 输出 aarch64）；
+7. 恢复 `qemu-aarch64`、注销 guard，确认原来的模拟器行为回来。
 
 `just systemd-install-test` 另走"真实安装路径"：把 conf 装进 `/usr/lib/binfmt.d/`（解释器指向本仓库构建的二进制）、由 `systemd-binfmt` 应用，再清空条目按文件名顺序重放一遍看优先级，最后移除 conf。
 
@@ -119,14 +147,14 @@ $ rm -f ~/.config/aosc-exec-guard.conf
 
 - **与模拟器条目的优先级**：已实测，见"实测结论"——systemd-binfmt 按文件名排序应用 conf、后应用者优先；`zz-aosc-exec-guard.conf` 排在 `qemu-*` 之后，所以**干净启动时 guard 先匹配**，由它询问/转发给模拟器（`AOSC_EXEC_GUARD_QEMU=never` 可让它不插手）。不想让 guard 介入的发行版/用户，把 conf 删掉或改名排到 qemu 前面即可，qemu 条目会照旧直接接管。
 - **ENOENT 盲区**：缺解释器的情况（如 32 位程序找不到 `/lib/ld-linux.so.2`、shebang 解释器不存在）报的是 `ENOENT` 而不是 `ENOEXEC`，`binfmt_misc` 拦不到，需要另行设计。
-- 文案暂未接 i18n（先用中文）；生产构建建议静态链接。
+- 文案暂未接 i18n（先用中文）；生产构建建议静态链接（`just build-static`）。
 
 ## 实测结论（2026-09-22，AOSC OS 13 / x86_64，已装 qemu-aarch64-static）
 
 1. **匹配时机**：`binfmt_misc` 条目在每次 exec 时先行匹配（先于 `binfmt_elf`）；命中即接管，不再尝试原生加载。
-2. **优先级**：条目按注册顺序迭代，**后注册者优先**；运行时手工注册（`kernel-test.sh` 的做法）会盖过开机时就存在的条目。
+2. **优先级**：条目按注册顺序迭代，**后注册者优先**；运行时手工注册（`sudo just kernel-test` 的做法）会盖过开机时就存在的条目。
 3. **systemd-binfmt 的顺序**：按文件名排序应用 conf 并逐个（重）注册；冲突时**最后应用的那个胜出**。
-4. **于是**：`zz-aosc-exec-guard.conf`（z）排在 `qemu-*.conf`（q）之后 → 干净启动时 guard 后应用、优先级更高 → **guard 先接住外来架构的程序**，再按 `--qemu` / `AOSC_EXEC_GUARD_QEMU` / 用户配置决定是转发给模拟器还是只解释（`kernel-test.sh`、`systemd-install-test.sh` 都会验证这一步）。
+4. **于是**：`zz-aosc-exec-guard.conf`（z）排在 `qemu-*.conf`（q）之后 → 干净启动时 guard 后应用、优先级更高 → **guard 先接住外来架构的程序**，再按 `--qemu` / `AOSC_EXEC_GUARD_QEMU` / 用户配置决定是转发给模拟器还是只解释（`just kernel-test`、`just systemd-install-test` 都会验证这一步）。
 5. **清理**：`systemd-binfmt` 重启会注销"不在配置里"的条目；也可手动 `echo -1 > /proc/sys/fs/binfmt_misc/<条目名>`。
 6. **打包注意**：conf 带 `F` 标志 → 注册时解释器文件必须已存在（试过不存在的路径，服务直接报 `No such file or directory` 注册失败）；二进制和 conf 在同一包里安装没问题。
 7. **端到端行为**：伪造和真实的 aarch64 ELF 都被 guard 接管（中文解释 + 退出码 126）；禁用/恢复 qemu、条目清理均验证通过。

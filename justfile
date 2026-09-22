@@ -21,6 +21,17 @@ default:
 build:
     cargo build --release
 
+# 静态构建（拷进 chroot / 容器用，省得连库一起拷；宿主安装还是用 just build）
+build-static:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # 必须带 --target：不带的话 RUSTFLAGS 会连 proc-macro（clap_derive）一起影响，
+    # 它就编不出来了。
+    target=$(rustc -vV | awk '/^host:/ {print $2}')
+    RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target "$target"
+    install -Dm755 "target/$target/release/aosc-exec-guard" target/static/aosc-exec-guard
+    file target/static/aosc-exec-guard
+
 # 代码检查：rustfmt + clippy
 check:
     cargo fmt --check
@@ -330,7 +341,7 @@ test: build
     step 'local checks passed'
     echo 'next: sudo just kernel-test'
 
-# 内核端到端测试（需要 root）：注册/优先级/qemu 转发/自动清理
+# 内核端到端测试（需要 root）：注册/优先级/chroot/qemu 转发/自动清理
 kernel-test:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -376,6 +387,11 @@ kernel-test:
 
     cleanup() {
       set +e
+      if [ -n "${CHR:-}" ]; then
+        umount "$CHR/proc" 2>/dev/null
+        rm -rf "$CHR"
+      fi
+      [ -n "${CHR2:-}" ] && rm -rf "$CHR2"
       [ -e "$ENTRY" ] && echo -1 > "$ENTRY"
       if [ -e "$QEMU_ENTRY" ]; then
         if [ "$QEMU_WAS_ENABLED" = yes ]; then echo 1 > "$QEMU_ENTRY"; else echo 0 > "$QEMU_ENTRY"; fi
@@ -440,6 +456,78 @@ kernel-test:
       set -e
       printf '%s\nexit=%s\n' "$out" "$code"
       [ "$code" -eq 126 ] || fail "exit code should be 126, got $code"
+    fi
+
+    step 'chroot：宿主条目照样命中；F 给出解释器文件，但动态解释器还要 rootfs 里有 ld.so'
+    CHR=$PWD/$TMP/chroot
+    rm -rf "${CHR:?}"
+    mkdir -p "$CHR/usr/bin" "$CHR/proc"
+    cp "$TMP/aarch64.elf" "$CHR/prog"
+    chmod +x "$CHR/prog"
+
+    # 条目带 F（fix binary）：解释器文件在注册时就打开，exec 时直接用宿主机上
+    # 的那一份。但它是动态链接的：ld.so/库仍按 rootfs 的根找 → 空 rootfs 里以
+    # ENOENT 收场（shell 报“No such file or directory”，不是“Exec format error”）。
+    set +e
+    out=$(chroot "$CHR" /prog 2>&1)
+    code=$?
+    set -e
+    printf '%s\nexit=%s\n' "$out" "$code"
+    case "$out" in
+      *'Exec format error'*) fail 'chroot 里条目竟没命中？' ;;
+      *'No such file'*) echo '=> 条目命中了；差的是动态解释器的 ld.so/库' ;;
+      *) fail 'chroot 行为出乎意料' ;;
+    esac
+
+    # 只把库（和 ld.so）拷进 rootfs，不拷 guard 二进制：靠 F 用宿主机那一份
+    while read -r left arrow right; do
+      install -Dm644 "$right" "$CHR$right"
+      case "$left" in /*) install -Dm755 "$right" "$CHR$left" ;; esac
+    done < <(ldd "$GUARD" | awk '/=> \// {print $1, $2, $3}')
+    set +e
+    out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR" /prog 2>&1)
+    code=$?
+    set -e
+    printf '%s\nexit=%s\n' "$out" "$code"
+    [ "$code" -eq 126 ] || fail "补上库之后 guard 应该解释并退 126，实际 $code"
+    case "$out" in *aarch64*) ;; *) fail 'rootfs 里的解释也该提到 aarch64' ;; esac
+
+    # 挂了 /proc 后，guard 能看出自己在 chroot 里（提示改成“模拟器在本 rootfs 里要能找到”）
+    mount -t proc proc "$CHR/proc"
+    set +e
+    out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR" /prog 2>&1)
+    code=$?
+    set -e
+    umount "$CHR/proc"
+    printf '%s\nexit=%s\n' "$out" "$code"
+    case "$out" in *chroot*) echo '=> guard 认出了 chroot，提示相应改变' ;; *) fail 'chroot 里的提示应该提到 chroot' ;; esac
+    rm -rf "${CHR:?}"
+
+    # 静态解释器 + F：rootfs 里什么都不放也能跑（qemu-user-static 就是这个组合）
+    if [ -x "$PWD/target/static/aosc-exec-guard" ]; then
+      step 'chroot：静态解释器 + F —— 空 rootfs 也能解释'
+      static_line=$(grep -F ':aosc-exec-guard-aarch64:' data/binfmt.d/zz-aosc-exec-guard.conf.in)
+      static_line=${static_line//\/usr\/bin\/aosc-exec-guard/$PWD/target/static/aosc-exec-guard}
+      [ -e "$ENTRY" ] && echo -1 > "$ENTRY"
+      printf '%s\n' "$static_line" > "$BM/register"
+      CHR2=$PWD/$TMP/chroot-bare
+      rm -rf "${CHR2:?}"
+      mkdir -p "${CHR2:?}"
+      cp "$TMP/aarch64.elf" "$CHR2/prog"
+      chmod +x "$CHR2/prog"
+      set +e
+      out=$(env AOSC_EXEC_GUARD_NO_DIALOG=1 chroot "$CHR2" /prog 2>&1)
+      code=$?
+      set -e
+      printf '%s\nexit=%s\n' "$out" "$code"
+      [ "$code" -eq 126 ] || fail "静态 guard 应该能在空 rootfs 里解释，实际 $code"
+      case "$out" in *aarch64*) ;; *) fail '空 rootfs 里的解释也该提到 aarch64' ;; esac
+      rm -rf "${CHR2:?}"
+      # 换回动态条目的设置，后面的转发测试还要用
+      [ -e "$ENTRY" ] && echo -1 > "$ENTRY"
+      printf '%s\n' "$line" > "$BM/register"
+    else
+      echo '（没有 target/static/aosc-exec-guard：跳过“静态解释器 + F”的 chroot 验证，可先跑 just build-static）'
     fi
 
     if [ -x "$TMP/busybox-aarch64" ] && [ "$QEMU_WAS_ENABLED" = yes ]; then
