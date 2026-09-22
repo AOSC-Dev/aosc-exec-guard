@@ -175,7 +175,7 @@ fn main() {
                             QemuMode::Never
                         };
                         if let Err(err) = save_qemu_mode(remembered) {
-                            eprintln!("aosc-exec-guard: {}", t!("cannot-remember", err = err));
+                            eprintln!("aosc-exec-guard: {:#}", err.context(t!("cannot-remember")));
                         }
                     }
                     outcome.run
@@ -188,8 +188,8 @@ fn main() {
         if run {
             let err = run_via_qemu(entry, target, program_args);
             eprintln!(
-                "aosc-exec-guard: {}",
-                t!("cannot-start", entry = entry.name, err = err)
+                "aosc-exec-guard: {:#}",
+                anyhow::Error::new(err).context(t!("cannot-start", entry = entry.name))
             );
         }
     }

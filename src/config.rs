@@ -3,6 +3,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use clap::ValueEnum;
 use rust_i18n::t;
 
@@ -84,18 +85,19 @@ fn load_saved_qemu_mode() -> Option<QemuMode> {
         .or_else(|| read_qemu_mode(&system_config_path()))
 }
 
-pub fn save_qemu_mode(mode: QemuMode) -> std::io::Result<()> {
-    let path =
-        user_config_path().ok_or_else(|| std::io::Error::other(t!("no-config-dir").to_string()))?;
+pub fn save_qemu_mode(mode: QemuMode) -> anyhow::Result<()> {
+    let path = user_config_path().context(t!("no-config-dir"))?;
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        std::fs::create_dir_all(dir)
+            .with_context(|| t!("cannot-write-config", path = dir.display().to_string()))?;
     }
     let value = match mode {
         QemuMode::Ask => "ask",
         QemuMode::Always => "always",
         QemuMode::Never => "never",
     };
-    std::fs::write(path, &*t!("user-config-content", value = value))
+    std::fs::write(&path, &*t!("user-config-content", value = value))
+        .with_context(|| t!("cannot-write-config", path = path.display().to_string()))
 }
 
 #[cfg(test)]

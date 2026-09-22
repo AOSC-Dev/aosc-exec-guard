@@ -22,8 +22,8 @@ hint-emulator-installed: "Hint: %{entry} is installed; set AOSC_EXEC_GUARD_QEMU=
 cannot-run: "\"%{path}\" cannot run: %{why}.\n%{hint}"
 native-but-rejected: "\"%{path}\" cannot run: it matches this machine (%{machine}), but the kernel rejected it - the file may be corrupted or in an unsupported format."
 cannot-run-notelf: "\"%{path}\" cannot run: %{why}."
-cannot-start: "cannot start %{entry}: %{err}"
-cannot-remember: "could not remember the \"don't ask again\" choice: %{err}"
+cannot-start: "cannot start %{entry}"
+cannot-remember: "could not remember the \"don't ask again\" choice"
 
 # ---------- 询问 ----------
 qemu-question: "\"%{path}\" cannot run on this machine directly: %{sentence}."
@@ -45,15 +45,15 @@ ho-restore-hint: "to restore: `sudo aosc-exec-guard --handover=off`, or rerun th
 ho-nothing-installed: "no guard binfmt entry and no config file (%{conf_name}) found: nothing to hand over."
 ho-already: "the guard is already handed over (%{conf_name}%{suffix} is still there); use `--handover=off` to restore."
 ho-no-conf-notice: "note: no config file (%{conf_name}) found; only the current entries are unregistered. If they were registered some other way they may come back after a reboot."
-ho-disable-failed: "could not disable %{path} (root needed?): %{err}"
+ho-disable-failed: "could not disable %{path} (root needed?)"
 ho-disabled: "disabled %{path}"
-ho-unregister-failed: "could not unregister entry %{name} (root needed?): %{err}"
+ho-unregister-failed: "could not unregister entry %{name} (root needed?)"
 ho-unregistered: "unregistered entry %{name}"
 ho-residue: "entries left behind after unregistering: %{list}"
 tb-question: "Restore the guard (rename its config file back and re-register its binfmt entries)?"
 tb-not-handed: "no disabled config file (%{conf_name}%{suffix}) found: not in the handover state."
 tb-test-mode: "(test mode: systemd-binfmt not restarted; entries return on reboot or reinstall.)"
-tb-restore-failed: "could not restore %{path} (root needed?): %{err}"
+tb-restore-failed: "could not restore %{path} (root needed?)"
 tb-restored: "restored %{path}"
 tb-done: "restored: guard entries are back (%{count})."
 tb-verify-failed: "config file restored, but no guard entry in the registry yet: check `systemctl status systemd-binfmt.service`."
@@ -61,12 +61,13 @@ ctx-chroot: "this looks like a chroot: the registry belongs to the host while th
 ctx-container: "this looks like a container (nested PID namespace): run this on the host (outside)."
 ctx-no-registry: "the binfmt_misc registry is not visible: run this on the host (outside)."
 confirm-needs-tty: "confirmation needed, but there is no terminal here: pass --yes (or run it in a terminal)."
-confirm-failed: "prompt failed: %{err}"
-restart-failed: "could not run systemctl (%{err}): please restart manually with `systemctl restart systemd-binfmt.service`."
+confirm-failed: "prompt failed"
+restart-failed: "could not run systemctl; please restart manually with `systemctl restart systemd-binfmt.service`"
 restart-status-failed: "`systemctl restart systemd-binfmt.service` failed: please restart it manually and check."
 
 # ---------- 用户配置文件 ----------
 no-config-dir: "cannot locate the user config dir (HOME / XDG_CONFIG_HOME)"
+cannot-write-config: "could not write %{path}"
 user-config-content: "# aosc-exec-guard user settings (written when \"don't ask again\" was chosen)\n# qemu: ask=ask every time (default) / always=always run via the emulator / never=never run\nqemu = %{value}\n"
 
 # ---------- 命令行 / --help（由 main.rs 的 clap 属性在运行时取用）----------

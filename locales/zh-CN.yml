@@ -20,8 +20,8 @@ hint-emulator-installed: "提示：本机已安装 %{entry}，设置 AOSC_EXEC_G
 cannot-run: "无法运行“%{path}”：%{why}。\n%{hint}"
 native-but-rejected: "无法运行“%{path}”：程序架构与本机一致（%{machine}），但内核拒绝了它，文件可能已损坏或格式不受支持。"
 cannot-run-notelf: "无法运行“%{path}”：%{why}。"
-cannot-start: "无法启动 %{entry}：%{err}"
-cannot-remember: "无法记住“不再询问”的选择：%{err}"
+cannot-start: "无法启动 %{entry}"
+cannot-remember: "无法记住“不再询问”的选择"
 
 # ---------- 询问 ----------
 qemu-question: "“%{path}”不能在本机直接运行：%{sentence}。"
@@ -43,15 +43,15 @@ ho-restore-hint: "恢复：`sudo aosc-exec-guard --handover=off`，或重新运�
 ho-nothing-installed: "没找到 guard 的 binfmt 条目，也没找到配置文件（%{conf_name}）：像是没装，无需让位。"
 ho-already: "guard 已经处于让位状态（%{conf_name}%{suffix} 还在）；要恢复用 `--handover=off`。"
 ho-no-conf-notice: "提醒：没找到配置文件（%{conf_name}），只注销当前条目；如果它是别的方式注册的，重启后可能回来。"
-ho-disable-failed: "停用 %{path} 失败（需要 root？）：%{err}"
+ho-disable-failed: "停用 %{path} 失败（需要 root？）"
 ho-disabled: "已停用 %{path}"
-ho-unregister-failed: "注销条目 %{name} 失败（需要 root？）：%{err}"
+ho-unregister-failed: "注销条目 %{name} 失败（需要 root？）"
 ho-unregistered: "已注销条目 %{name}"
 ho-residue: "注销之后还有残留条目：%{list}"
 tb-question: "恢复 guard：把配置文件改回来，并重新注册它的 binfmt 条目？"
 tb-not-handed: "没有找到停用的配置文件（%{conf_name}%{suffix}）：当前不在让位状态。"
 tb-test-mode: "（测试模式：不重启 systemd-binfmt；条目会在重启或重装时回来。）"
-tb-restore-failed: "恢复 %{path} 失败（需要 root？）：%{err}"
+tb-restore-failed: "恢复 %{path} 失败（需要 root？）"
 tb-restored: "已恢复 %{path}"
 tb-done: "已恢复：guard 条目回来了（%{count} 个）。"
 tb-verify-failed: "配置文件已恢复，但注册表里还没看到 guard 条目：看看 `systemctl status systemd-binfmt.service`。"
@@ -59,12 +59,13 @@ ctx-chroot: "看起来在 chroot 里：注册表属于宿主机、配置文件�
 ctx-container: "看起来在容器里（嵌套的 PID namespace）：请在宿主机（外面）上运行。"
 ctx-no-registry: "看不到 binfmt_misc 注册表：请在宿主机（外面）上运行。"
 confirm-needs-tty: "需要确认，但这里没有终端：请加 --yes（或到终端里运行）。"
-confirm-failed: "询问失败：%{err}"
-restart-failed: "没法运行 systemctl（%{err}）：请手动 `systemctl restart systemd-binfmt.service`。"
+confirm-failed: "询问失败"
+restart-failed: "没法运行 systemctl；请手动 `systemctl restart systemd-binfmt.service` 重启"
 restart-status-failed: "`systemctl restart systemd-binfmt.service` 失败：请手动重启后再看。"
 
 # ---------- 用户配置文件 ----------
 no-config-dir: "无法定位用户配置目录（HOME / XDG_CONFIG_HOME）"
+cannot-write-config: "写 %{path} 失败"
 user-config-content: "# aosc-exec-guard 用户设置（“不再询问”时写入）\n# qemu: ask=每次询问（默认）/ always=总是用仿真器运行 / never=从不运行\nqemu = %{value}\n"
 
 # ---------- 命令行 / --help（由 main.rs 的 clap 属性在运行时取用）----------

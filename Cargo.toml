@@ -21,6 +21,9 @@ clap = { version = "4", default-features = false, features = [
 # Terminal prompt menu for the qemu offer; the editor/password helpers are
 # not needed, so the default features stay off.
 dialoguer = { version = "0.12", default-features = false }
+# Error plumbing: `?`/context chains for the paths that can fail (handover,
+# writing the config); the messages stay localized via rust-i18n.
+anyhow = "1"
 dirs = "7.0.0"
 rust-i18n = "4.2.2"
 

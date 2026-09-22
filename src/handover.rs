@@ -18,6 +18,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use anyhow::{Context as _, bail};
 use clap::ValueEnum;
 use dialoguer::Confirm;
 use rust_i18n::t;
@@ -54,30 +55,33 @@ pub fn run(action: Action, assume_yes: bool) -> i32 {
     };
     match result {
         Ok(()) => 0,
-        Err(message) => {
-            eprintln!("aosc-exec-guard: {message}");
+        Err(err) => {
+            // `{:#}` 展开 anyhow 的 context 链（本模块的文案大多是 context）。
+            eprintln!("aosc-exec-guard: {err:#}");
             1
         }
     }
 }
 
-fn hand_over(assume_yes: bool) -> Result<(), String> {
+fn hand_over(assume_yes: bool) -> anyhow::Result<()> {
     check_host_context()?;
     let dir = binfmt_dir();
     let (installed, disabled) = conf_files();
     let entries = guard_entries(&dir);
 
     if installed.is_empty() && entries.is_empty() {
-        return if disabled.is_empty() {
-            Err(t!("ho-nothing-installed", conf_name = CONF_NAME).into())
+        if disabled.is_empty() {
+            bail!("{}", t!("ho-nothing-installed", conf_name = CONF_NAME));
         } else {
-            Err(t!(
-                "ho-already",
-                conf_name = CONF_NAME,
-                suffix = DISABLED_SUFFIX
-            )
-            .into())
-        };
+            bail!(
+                "{}",
+                t!(
+                    "ho-already",
+                    conf_name = CONF_NAME,
+                    suffix = DISABLED_SUFFIX
+                )
+            );
+        }
     }
 
     let qemu = enabled_qemu_entries(&dir);
@@ -103,14 +107,8 @@ fn hand_over(assume_yes: bool) -> Result<(), String> {
 
     for path in &installed {
         let target = disabled_path(path);
-        std::fs::rename(path, &target).map_err(|err| {
-            t!(
-                "ho-disable-failed",
-                path = path.display().to_string(),
-                err = err
-            )
-            .to_string()
-        })?;
+        std::fs::rename(path, &target)
+            .with_context(|| t!("ho-disable-failed", path = path.display().to_string()))?;
         println!("{}", t!("ho-disabled", path = path.display().to_string()));
     }
     for name in &entries {
@@ -120,7 +118,10 @@ fn hand_over(assume_yes: bool) -> Result<(), String> {
 
     let left = guard_entries(&dir);
     if !left.is_empty() {
-        return Err(t!("ho-residue", list = left.join(&t!("list-separator"))).into());
+        bail!(
+            "{}",
+            t!("ho-residue", list = left.join(&t!("list-separator")))
+        );
     }
 
     println!("{}", t!("ho-done"));
@@ -129,17 +130,19 @@ fn hand_over(assume_yes: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn take_back(assume_yes: bool) -> Result<(), String> {
+fn take_back(assume_yes: bool) -> anyhow::Result<()> {
     check_host_context()?;
     let dir = binfmt_dir();
     let (_, disabled) = conf_files();
     if disabled.is_empty() {
-        return Err(t!(
-            "tb-not-handed",
-            conf_name = CONF_NAME,
-            suffix = DISABLED_SUFFIX
-        )
-        .into());
+        bail!(
+            "{}",
+            t!(
+                "tb-not-handed",
+                conf_name = CONF_NAME,
+                suffix = DISABLED_SUFFIX
+            )
+        );
     }
     if !assume_yes && !confirm(&t!("tb-question"))? {
         println!("aosc-exec-guard: {}", t!("cancelled"));
@@ -150,14 +153,8 @@ fn take_back(assume_yes: bool) -> Result<(), String> {
         let Some(conf) = enabled_path(path) else {
             continue;
         };
-        std::fs::rename(path, &conf).map_err(|err| {
-            t!(
-                "tb-restore-failed",
-                path = path.display().to_string(),
-                err = err
-            )
-            .to_string()
-        })?;
+        std::fs::rename(path, &conf)
+            .with_context(|| t!("tb-restore-failed", path = path.display().to_string()))?;
         println!("{}", t!("tb-restored", path = conf.display().to_string()));
     }
 
@@ -168,43 +165,42 @@ fn take_back(assume_yes: bool) -> Result<(), String> {
     restart_binfmt()?;
     let entries = guard_entries(&dir);
     if entries.is_empty() {
-        return Err(t!("tb-verify-failed").into());
+        bail!("{}", t!("tb-verify-failed"));
     }
     println!("{}", t!("tb-done", count = entries.len()));
     Ok(())
 }
 
 /// 让位必须做在宿主机上：注册表、配置文件、以及重启后的重放得属于同一个系统。
-fn check_host_context() -> Result<(), String> {
+fn check_host_context() -> anyhow::Result<()> {
     if in_chroot() {
-        return Err(t!("ctx-chroot").into());
+        bail!("{}", t!("ctx-chroot"));
     }
     if in_container() {
-        return Err(t!("ctx-container").into());
+        bail!("{}", t!("ctx-container"));
     }
     if !registry_visible() {
-        return Err(t!("ctx-no-registry").into());
+        bail!("{}", t!("ctx-no-registry"));
     }
     Ok(())
 }
 
-fn confirm(question: &str) -> Result<bool, String> {
+fn confirm(question: &str) -> anyhow::Result<bool> {
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
-        return Err(t!("confirm-needs-tty").into());
+        bail!("{}", t!("confirm-needs-tty"));
     }
     Confirm::new()
         .with_prompt(question)
         .default(false)
         .interact()
-        .map_err(|err| t!("confirm-failed", err = err).into())
+        .context(t!("confirm-failed"))
 }
 
 /// 注销注册表里的一个条目：写 `-1`（内核语义）。测试目录（普通文件）里写完再
 /// 删掉文件；真实的 procfs 里内核会把文件本身收走。
-fn unregister(dir: &Path, name: &str) -> Result<(), String> {
+fn unregister(dir: &Path, name: &str) -> anyhow::Result<()> {
     let path = dir.join(name);
-    std::fs::write(&path, "-1")
-        .map_err(|err| t!("ho-unregister-failed", name = name, err = err).to_string())?;
+    std::fs::write(&path, "-1").with_context(|| t!("ho-unregister-failed", name = name))?;
     if env::var_os("AOSC_EXEC_GUARD_BINFMT_DIR").is_some() {
         let _ = std::fs::remove_file(&path);
     }
@@ -212,7 +208,7 @@ fn unregister(dir: &Path, name: &str) -> Result<(), String> {
 }
 
 /// 重启 systemd-binfmt，让它按 conf 重新注册条目。
-fn restart_binfmt() -> Result<(), String> {
+fn restart_binfmt() -> anyhow::Result<()> {
     // 先清掉 systemd 的开始频率限制：restart 的 stop 阶段会注销所有条目，
     // 若 start 被限流挡住就什么都不剩（和 scripts/install.sh 同款处理）。
     let _ = Command::new("systemctl")
@@ -221,9 +217,9 @@ fn restart_binfmt() -> Result<(), String> {
     let status = Command::new("systemctl")
         .args(["restart", "systemd-binfmt.service"])
         .status()
-        .map_err(|err| t!("restart-failed", err = err).to_string())?;
+        .context(t!("restart-failed"))?;
     if !status.success() {
-        return Err(t!("restart-status-failed").into());
+        bail!("{}", t!("restart-status-failed"));
     }
     Ok(())
 }
