@@ -22,7 +22,7 @@
 
   规则里的 magic/mask **逐字节抄自 AOSC OS 的 qemu-user 包**（`/usr/lib/binfmt.d/qemu-*.conf`，20 条），i386/x86_64 两条按同一模板补上（qemu 上游也有，本机因为是 x86_64 被它自己的安装器过滤掉了）——集合要全，别的主机才能拿它解释 amd64 程序。以后要覆盖新架构，从 qemu 的 conf/上游脚本里再抄一行即可。
 
-  `zz-` 前缀不是随手起的：systemd-binfmt 按文件名排序应用 conf、后应用者优先（实测），`zz-` 让 guard 排在 `qemu-*` 之后 → **guard 先接住外来架构的程序**，再由它决定要不要交给模拟器（见下）。
+  `zz-` 前缀不是随手起的：systemd-binfmt 按文件名排序应用 conf、后应用者优先（实测），`zz-` 让 guard 排在 `qemu-*` 之后 → **guard 先接住外来架构的程序**，再由它决定要不要交给模拟器（见下）。**但这是“手动安装、没有包管理器介入”下的结论**：装到 AOSC OS 上之后，同一架构有好几个包能提供模拟器时，谁生效由 **`update-alternatives` 的优先级**决定——这些包把 conf 放在 `/usr/lib/binfmt.alternatives/`，由 alternatives 链接 `/usr/lib/binfmt.d/emu-<arch>.conf` 指过去（截至 2026-09：qemu 50、FEX 60、latx 80、box64 90；见 abbs 的 `app-virtualization/qemu/29-static-x86_64/build`、`app-emulation/{fex,latx,box64}/autobuild/alternatives`）。这套目前只用在本机跑不了、需要“外来 i386/x86_64”的场合（qemu 的构建脚本只在宿主不是 amd64/i486 时才生成 alternatives 条目），外来架构还是各包直接放 `qemu-<arch>.conf`，所以现在两者能并存、靠文件名分先后；打包进 AOSC 时 guard 怎么参与（单独一个 conf，还是加进同一组候选并定优先级）是那时要定的事，不能指望 `zz-`。
 
   例如其中 aarch64 那条：
 
@@ -243,19 +243,19 @@ $ sudo just install      # 装静态版；或手动 install -Dm755 target/static
 
 ## 已知问题 / 待办
 
-- **与模拟器条目的优先级**：已实测，见"实测结论"——systemd-binfmt 按文件名排序应用 conf、后应用者优先；`zz-aosc-exec-guard.conf` 排在 `qemu-*` 之后，所以**干净启动时 guard 先匹配**，由它询问/转发给模拟器（`AOSC_EXEC_GUARD_QEMU=never` 可让它不插手）。不想让 guard 介入的发行版/用户，把 conf 删掉或改名排到 qemu 前面即可，qemu 条目会照旧直接接管；`--handover` 就是把这件事做全（注销条目 + 停用 conf）。
+- **与模拟器条目的优先级**（前提是手动安装，见“实测结论”）：binfmt_misc 条目按注册顺序迭代、**后注册者优先**，systemd-binfmt 按文件名排序应用 conf；`zz-aosc-exec-guard.conf` 排在 `qemu-*` 之后，所以**干净启动时 guard 先匹配**，由它询问/转发给模拟器（`AOSC_EXEC_GUARD_QEMU=never` 可让它不插手）。**打包到系统上之后就不是文件名的事了**：同一架构有多个包能提供模拟器时，谁生效由 `update-alternatives` 的优先级决定（`/usr/lib/binfmt.d/emu-<arch>.conf` 指向优先级最高的候选包，见上文“原理”）。不想让 guard 介入的发行版/用户，把 conf 删掉或改名排到 qemu 前面即可，qemu 条目会照旧直接接管；`--handover` 就是把这件事做全（注销条目 + 停用 conf）。
 - **`--handover` 的代价**：让位之后 guard 的询问/解释不再出现，“总是不运行”这类用户级选择失效（见「让位给内核的 qemu 条目」）。
 - **ENOENT 盲区**：缺解释器的情况（如 32 位程序找不到 `/lib/ld-linux.so.2`、shebang 解释器不存在）报的是 `ENOENT` 而不是 `ENOEXEC`，`binfmt_misc` 拦不到，需要另行设计。
 - 文案内置中/英（见上文“语言”），跟判定无关；生产构建就是静态的（`just build`，见上文“构建”）。
 
-## 实测结论（2026-09-22，AOSC OS 13 / x86_64，已装 qemu-aarch64-static）
+## 实测结论（2026-09-22，AOSC OS 13 / x86_64，已装 qemu-aarch64-static；都是手动安装路径，没经过 alternatives）
 
 1. **匹配时机**：`binfmt_misc` 条目在每次 exec 时先行匹配（先于 `binfmt_elf`）；命中即接管，不再尝试原生加载。
 2. **优先级**：条目按注册顺序迭代，**后注册者优先**；运行时手工注册（`sudo just kernel-test` 的做法）会盖过开机时就存在的条目。
 3. **systemd-binfmt 的顺序**：按文件名排序应用 conf 并逐个（重）注册；冲突时**最后应用的那个胜出**。
-4. **于是**：`zz-aosc-exec-guard.conf`（z）排在 `qemu-*.conf`（q）之后 → 干净启动时 guard 后应用、优先级更高 → **guard 先接住外来架构的程序**，再按 `--qemu` / `AOSC_EXEC_GUARD_QEMU` / 用户配置决定是转发给模拟器还是只解释（`just kernel-test`、`just systemd-install-test` 都会验证这一步）。
+4. **于是（手动安装的前提）**：`zz-aosc-exec-guard.conf`（z）排在 `qemu-*.conf`（q）之后 → 干净启动时 guard 后应用、优先级更高 → **guard 先接住外来架构的程序**，再按 `--qemu` / `AOSC_EXEC_GUARD_QEMU` / 用户配置决定是转发给模拟器还是只解释（`just kernel-test`、`just systemd-install-test` 都会验证这一步；这两个配方走的都是“手工把 conf 放进 `/usr/lib/binfmt.d/`”的路径）。
 5. **清理**：`systemd-binfmt` 重启会注销"不在配置里"的条目；也可手动 `echo -1 > /proc/sys/fs/binfmt_misc/<条目名>`。
-6. **打包注意**：conf 带 `F` 标志 → 注册时解释器文件必须已存在（试过不存在的路径，服务直接报 `No such file or directory` 注册失败）；二进制和 conf 在同一包里安装没问题。
+6. **打包注意**：conf 带 `F` 标志 → 注册时解释器文件必须已存在（试过不存在的路径，服务直接报 `No such file or directory` 注册失败）；二进制和 conf 在同一包里安装没问题。另外，**同一架构有多个包能提供模拟器时，谁生效由 alternatives 优先级决定**（`/usr/lib/binfmt.d/emu-<arch>.conf` 链接到优先级最高的候选包，i386/x86_64 家族现为 qemu 50 / FEX 60 / latx 80 / box64 90），guard 真要打包时得按这套机制参与，别依赖 conf 文件名字典序。
 7. **端到端行为**：伪造和真实的 aarch64 ELF 都被 guard 接管（中文解释 + 退出码 126）；禁用/恢复 qemu、条目清理均验证通过。
 8. **一个 conf 文件可以放多条规则**：`man binfmt.d` 原文是 "Each file contains a list of binfmt_misc kernel binary format rules"，systemd-binfmt 逐行注册、`#`/`;` 开头的注释行忽略（实测：一个文件里两行规则同时注册成功，删掉文件重启后对应条目消失）。
 9. **本机架构怎么排除**：不需要为每个目标架构各存一份 conf。qemu 上游（`qemu-binfmt-conf.sh`）是按 CPU **家族**过滤的——i386+x86_64 一族、arm+aarch64 一族、mips 全族、ppc/ppc64 一族、sparc 全族等，`ignore-family=yes`（`just install` 的第三个参数）对应 qemu 的同名选项：同家族但本机跑不了的目标，如 riscv64 上的 riscv32。`just install` 抄的就是这套表，实测：本机 x86_64 装完剩 20 条（去掉 i386+x86_64），目标换成 aarch64 则去掉 arm+aarch64、保留 x86_64。
