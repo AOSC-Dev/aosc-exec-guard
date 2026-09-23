@@ -21,6 +21,7 @@ use std::process::Command;
 use anyhow::{Context as _, bail};
 use clap::ValueEnum;
 use dialoguer::Confirm;
+use dialoguer::theme::ColorfulTheme;
 use rust_i18n::t;
 
 use crate::platform::{in_chroot, in_container};
@@ -189,7 +190,9 @@ fn confirm(question: &str) -> anyhow::Result<bool> {
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         bail!("{}", t!("confirm-needs-tty"));
     }
-    Confirm::new()
+    // 和终端菜单同一套观感（dialoguer 自带的 ColorfulTheme）。
+    let theme = ColorfulTheme::default();
+    Confirm::with_theme(&theme)
         .with_prompt(question)
         .default(false)
         .interact()

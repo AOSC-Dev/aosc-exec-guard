@@ -288,6 +288,7 @@ test: build
     [ "$code" -eq 126 ] || fail "the default item should explain and exit 126, got $code"
     case "$out" in *'无法运行'*) ;; *) fail 'declining should print the explanation' ;; esac
     case "$out" in *'总是运行（不再询问）'*) ;; *) fail 'the dialoguer menu should have been drawn' ;; esac
+    case "$out" in *'❯'*) ;; *) fail '菜单该用 dialoguer 自带的 ColorfulTheme（❯ 指着当前项）' ;; esac
     case "$out" in *'总是不运行'*) fail '菜单里不该再有“总是不运行”（要固定 never 用配置/环境变量）' ;; esac
     ask_pty 'k\n'  # 上移一项 → 运行（这次）
     [ "$code" -eq 42 ] || fail "choosing “run once” should run the stub qemu, got $code"

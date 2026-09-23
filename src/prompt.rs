@@ -6,6 +6,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use dialoguer::theme::ColorfulTheme;
 use dialoguer::{Select, console::Term};
 use rust_i18n::t;
 
@@ -300,7 +301,10 @@ fn ask_terminal(
     // `qemu = never` 配置或 `AOSC_EXEC_GUARD_QEMU=never`），默认项仍是“不运行”。
     let items = [t!("menu-run-once"), t!("menu-decline"), t!("menu-always")];
 
-    let choice = Select::new()
+    // 菜单用 dialoguer 自带的 ColorfulTheme：黄 `?` + 灰 `›` 起头，绿色 `❯` 指着
+    // 当前项（青色），确认后 `✔` 报告结果。默认主题是纯 ASCII，终端里太干。
+    let theme = ColorfulTheme::default();
+    let choice = Select::with_theme(&theme)
         .with_prompt(t!("run-with-prompt", entry = entry.name))
         .items(items)
         .default(1)
