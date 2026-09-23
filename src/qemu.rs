@@ -1,8 +1,11 @@
 //! 模拟器（qemu-user）的发现与转发。
 //!
-//! 只认 binfmt_misc 注册表：先看本进程可见的那份；看不到时（chroot / 容器里
-//! 很常见）退回宿主机的注册表（`/proc/1/root`）。不猜 `/usr/bin/qemu-*` 之类
-//! 的路径——两边都说没有就返回 None，由调用方解释退出。
+//! 认三处（按顺序）：本进程可见的 binfmt_misc 注册表；看不到时（chroot / 容器
+//! 里很常见）退回宿主机的注册表（`/proc/1/root`）；都没有就翻
+//! `/usr/lib/binfmt.alternatives/` 的候选 conf——box64 式打包（见
+//! `scripts/install.sh --alternatives`）下，`/usr/lib/binfmt.d/emu-<arch>.conf`
+//! 这个槽位指向 guard 自己的 conf，真正干活的模拟器就不在注册表里了。
+//! 不猜 `/usr/bin/qemu-*` 之类的固定路径。
 
 use std::env;
 use std::ffi::OsString;
@@ -63,15 +66,27 @@ pub struct QemuEntry {
     pub flags: String,
 }
 
-/// 找一个已启用、且解释器还在的 qemu 条目。
+/// 找一个已启用、且解释器还在的模拟器条目。
 ///
-/// 只认注册表：本进程看得见就用本地那份；看不见（chroot / 容器里很常见）就
-/// 借宿主机的那份。两边都没有就返回 None——不做路径猜测。
+/// 先查注册表（本进程可见的那份；看不见就借宿主机那份），没有再去
+/// `/usr/lib/binfmt.alternatives/` 的候选 conf 里找（槽位被 guard 占住时
+/// 模拟器只在那里）；三处都没有就返回 None——不做路径猜测。
 pub fn find_qemu_entry(info: &ElfInfo) -> Option<QemuEntry> {
-    if registry_visible() {
-        return find_qemu_entry_in(&binfmt_dir(), info);
-    }
-    find_host_qemu_entry(info)
+    let from_registry = if registry_visible() {
+        find_qemu_entry_in(&binfmt_dir(), info)
+    } else {
+        find_host_qemu_entry(info)
+    };
+    from_registry.or_else(|| find_alternatives_entry(&alternatives_dir(), info))
+}
+
+/// alternatives 的候选目录（box64 式打包把 conf 放这儿，由 update-alternatives
+/// 链接进 `/usr/lib/binfmt.d/emu-<arch>.conf`）。测试可用
+/// AOSC_EXEC_GUARD_ALTERNATIVES_DIR 指到假目录。
+pub fn alternatives_dir() -> PathBuf {
+    env::var_os("AOSC_EXEC_GUARD_ALTERNATIVES_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/usr/lib/binfmt.alternatives"))
 }
 
 /// 本进程能看到 binfmt_misc 注册表吗——挂载点里有 `register` 文件才算数。
@@ -94,6 +109,129 @@ fn find_qemu_entry_in(dir: &Path, info: &ElfInfo) -> Option<QemuEntry> {
         let text = std::fs::read_to_string(dir.join(name)).ok()?;
         let entry = parse_qemu_entry(name, &text)?;
         entry.interpreter.is_file().then_some(entry)
+    })
+}
+
+/// 注册表里没有时，翻 alternatives 的候选 conf：槽位（`emu-<arch>.conf`）被
+/// guard 自己占住时，负责干活的模拟器（qemu / box64 / FEX…）就只剩这里能看。
+/// 挑法：先按老规矩找名字是 `qemu-<arch>` 的那条（和以前注册表里会命中的条目
+/// 一致），再退到第一条能命中这个 ELF 的候选（按 conf 文件名排序，结果确定）。
+fn find_alternatives_entry(dir: &Path, info: &ElfInfo) -> Option<QemuEntry> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "conf"))
+        .collect();
+    files.sort();
+    let mut candidates: Vec<QemuEntry> = Vec::new();
+    for file in files {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        for line in text.lines() {
+            if let Some(entry) = parse_conf_line(line, info)
+                && entry.interpreter.is_file()
+            {
+                candidates.push(entry);
+            }
+        }
+    }
+    let names = qemu_entry_names(info);
+    candidates
+        .iter()
+        .find(|entry| names.contains(&entry.name.as_str()))
+        .or_else(|| candidates.first())
+        .cloned()
+}
+
+/// 解析一行 binfmt conf（`:名字:M::magic:mask:解释器:flags`），只保留会命中
+/// `info` 描述的这个 ELF 的（guard 自己的条目跳过）。
+fn parse_conf_line(line: &str, info: &ElfInfo) -> Option<QemuEntry> {
+    let line = line.trim();
+    if !line.starts_with(':') || line.starts_with("#") {
+        return None;
+    }
+    let mut fields = line.splitn(8, ':');
+    fields.next()?; // 开头的空字段（行首的 ':'）
+    let name = fields.next()?;
+    if name.is_empty() || name.starts_with("aosc-exec-guard-") {
+        return None;
+    }
+    if fields.next()? != "M" {
+        return None; // 只认 magic 匹配的条目
+    }
+    let offset = fields.next()?;
+    if !offset.is_empty() && offset != "0" {
+        return None; // 偏移固定是 0（qemu / box64 的 conf 都写成空的 offset）
+    }
+    let magic = unescape_bytes(fields.next()?)?;
+    let mask = unescape_bytes(fields.next()?)?;
+    let interpreter = fields.next()?;
+    let flags = fields.next().unwrap_or_default().to_string();
+    if !magic_matches(&magic, &mask, info) {
+        return None;
+    }
+    Some(QemuEntry {
+        name: name.to_string(),
+        interpreter: PathBuf::from(interpreter),
+        flags,
+    })
+}
+
+/// `\x7fELF` 这种写法 → 字节（conf 里的 magic/mask 只有 `\xNN` 和字面字符）。
+fn unescape_bytes(field: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut chars = field.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if chars.next()? != 'x' {
+                return None;
+            }
+            let hi = chars.next()?.to_digit(16)?;
+            let lo = chars.next()?.to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+        } else if c.is_ascii() {
+            out.push(c as u8);
+        } else {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// conf 的 magic/mask 会命中 `info` 这个 ELF 吗。
+///
+/// 只核对 conf 真正钉住的位：
+/// ELF 标识（0..4）、class（4）、endianness（5）、e_machine（18..20）。
+/// e_type（16..18）这类我们手里没有的字节交给 conf 自己（qemu / box64 / 我们
+/// 生成的 conf 都只钉前几样，e_type 那字节的 mask 是 `\xfe` = ET_EXEC | ET_DYN）。
+/// 要求 conf 至少钉住 class / endianness / e_machine，免得全零 mask 的 conf
+/// （匹配一切）被当成候选。
+fn magic_matches(magic: &[u8], mask: &[u8], info: &ElfInfo) -> bool {
+    if magic.len() < 20 || mask.len() < 20 {
+        return false;
+    }
+    if mask[4] == 0 || mask[5] == 0 || (mask[18] == 0 && mask[19] == 0) {
+        return false;
+    }
+    let mut expected = [0u8; 20];
+    expected[0..4].copy_from_slice(b"\x7fELF");
+    expected[4] = match info.class {
+        ElfClass::Bits32 => 1,
+        ElfClass::Bits64 => 2,
+    };
+    expected[5] = match info.endian {
+        Endian::Little => 1,
+        Endian::Big => 2,
+    };
+    let machine = match info.endian {
+        Endian::Little => info.machine.to_le_bytes(),
+        Endian::Big => info.machine.to_be_bytes(),
+    };
+    expected[18..20].copy_from_slice(&machine);
+    [0, 1, 2, 3, 4, 5, 18, 19].iter().all(|&index| {
+        mask[index] == 0 || (magic[index] & mask[index]) == (expected[index] & mask[index])
     })
 }
 
@@ -181,6 +319,117 @@ pub fn run_via_qemu(entry: &QemuEntry, target: &Path, program_args: &[OsString])
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 造一个放 alternatives 候选 conf 的临时目录（测试并行跑，名字带 tag）。
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("aosc-guard-alt-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// `:名字:M::magic:mask:解释器:flags`——magic/mask 取自 qemu 的 conf，只换机器码。
+    fn conf_line(name: &str, interpreter: &Path, machine: &str, flags: &str) -> String {
+        format!(
+            ":{name}:M::\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\
+             \\x02\\x00\\x{machine}\\x00\
+             :\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\x00\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\
+             \\xfe\\xff\\xff\\xff\
+             :{}:{flags}\n",
+            interpreter.display()
+        )
+    }
+
+    /// guard 占住槽位（box64 式打包）时，模拟器只能从 alternatives 的候选里找。
+    #[test]
+    fn alternatives_candidates_fill_in_when_the_registry_has_nothing() {
+        let dir = temp_dir("find");
+        let box64 = dir.join("box64");
+        let qemu = dir.join("qemu-aarch64-static");
+        std::fs::write(&box64, "").unwrap();
+        std::fs::write(&qemu, "").unwrap();
+        std::fs::write(
+            dir.join("box64.conf"),
+            conf_line("box64", &box64, "3e", "P"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("qemu-aarch64.conf"),
+            conf_line("qemu-aarch64", &qemu, "b7", "CF"),
+        )
+        .unwrap();
+        // 槽位里就是 guard 自己的 conf：必须跳过，不然会自己转发给自己。
+        std::fs::write(
+            dir.join("aosc-exec-guard-aarch64.conf"),
+            conf_line("aosc-exec-guard-aarch64", &qemu, "b7", "F"),
+        )
+        .unwrap();
+        // 解释器已经不在的候选也不算数。
+        std::fs::write(
+            dir.join("qemu-riscv64.conf"),
+            conf_line("qemu-riscv64", &dir.join("nope"), "f3", "CF"),
+        )
+        .unwrap();
+
+        let aarch64 = ElfInfo {
+            class: ElfClass::Bits64,
+            endian: Endian::Little,
+            machine: 0xb7,
+        };
+        let found = find_alternatives_entry(&dir, &aarch64).unwrap();
+        assert_eq!(found.name, "qemu-aarch64");
+        assert_eq!(found.interpreter, qemu);
+        assert_eq!(found.flags, "CF");
+
+        // 没有 qemu 名字的候选（box64 跑 x86_64）也认，取第一条命中的。
+        let x86_64 = ElfInfo {
+            class: ElfClass::Bits64,
+            endian: Endian::Little,
+            machine: 0x3e,
+        };
+        assert_eq!(
+            find_alternatives_entry(&dir, &x86_64).unwrap().name,
+            "box64"
+        );
+
+        // 谁也不命中（riscv64 的解释器不在）→ 没有候选。
+        let riscv64 = ElfInfo {
+            class: ElfClass::Bits64,
+            endian: Endian::Little,
+            machine: 0xf3,
+        };
+        assert!(find_alternatives_entry(&dir, &riscv64).is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 位宽、字节序对不上的候选不能认。
+    #[test]
+    fn alternatives_candidates_ignore_the_wrong_class_or_endianness() {
+        let dir = temp_dir("class");
+        let interpreter = dir.join("qemu-aarch64-static");
+        std::fs::write(&interpreter, "").unwrap();
+        std::fs::write(
+            dir.join("qemu-aarch64.conf"),
+            conf_line("qemu-aarch64", &interpreter, "b7", "CF"),
+        )
+        .unwrap();
+
+        let bits32 = ElfInfo {
+            class: ElfClass::Bits32,
+            endian: Endian::Little,
+            machine: 0xb7,
+        };
+        assert!(find_alternatives_entry(&dir, &bits32).is_none());
+        let big_endian = ElfInfo {
+            class: ElfClass::Bits64,
+            endian: Endian::Big,
+            machine: 0xb7,
+        };
+        assert!(find_alternatives_entry(&dir, &big_endian).is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn qemu_entry_names_follow_arch_and_endianness() {

@@ -194,6 +194,28 @@ test: build
     [ ! -e "$TMP/pkg/bin/aosc-exec-guard" ] || fail 'uninstall 没删二进制'
     [ ! -e "$TMP/pkg/share/aosc-exec-guard/dialog.qml" ] || fail 'uninstall 没删 QML'
 
+    step 'installer: --alternatives（box64 式：conf 进 binfmt.alternatives + 槽位声明）'
+    rm -rf "$TMP/pkg-alt"
+    scripts/install.sh --prefix "$TMP/pkg-alt" --alternatives --priority 100 \
+      > "$TMP/install-alt.log" 2>&1 \
+      || fail "install.sh --alternatives 失败：$(cat "$TMP/install-alt.log")"
+    [ -d "$TMP/pkg-alt/lib/binfmt.alternatives" ] || fail 'alternatives 模式该把 conf 放 lib/binfmt.alternatives/'
+    [ ! -e "$TMP/pkg-alt/lib/binfmt.d/zz-aosc-exec-guard.conf" ] || fail 'alternatives 模式不该再有普通 conf'
+    [ ! -e "$TMP/pkg-alt/lib/binfmt.d/emu-x86_64.conf" ] || fail '本机家族的槽位不该出现（会被过滤掉）'
+    for arch in aarch64 riscv64 loongarch64; do
+      conf=$TMP/pkg-alt/lib/binfmt.alternatives/aosc-exec-guard-$arch.conf
+      [ -f "$conf" ] || fail "缺少 $arch 的 conf"
+      [ "$(grep -c '^:' "$conf")" -eq 1 ] || fail "$arch 的 conf 应该只有 1 条规则（别的都进别的文件）"
+      grep -q "^:aosc-exec-guard-$arch:" "$conf" || fail "$arch 的 conf 里规则名不对"
+    done
+    grep -q '^alternative /usr/lib/binfmt.d/emu-aarch64.conf /usr/lib/binfmt.alternatives/aosc-exec-guard-aarch64.conf 100$' \
+      "$TMP/pkg-alt/share/aosc-exec-guard/alternatives" \
+      || fail 'alternatives 声明里应有 emu-aarch64.conf 那一行（路径按装好后的 /usr 写）'
+    scripts/install.sh --prefix "$TMP/pkg-alt" --uninstall > /dev/null \
+      || fail 'alternatives 模式的 staging 卸载失败'
+    [ ! -e "$TMP/pkg-alt/lib/binfmt.alternatives/aosc-exec-guard-aarch64.conf" ] \
+      || fail 'staging 卸载没删 alternatives 里的 conf'
+
     step 'stubs: fake binfmt dir + stub qemu + stub zenity'
     mkdir -p "$TMP/bin" "$TMP/binfmt"
     cat > "$TMP/bin/qemu-aarch64" <<'STUB'
@@ -256,6 +278,25 @@ test: build
     [ "$code" -eq 42 ] || fail "exit status should come from the stub qemu (42), got $code"
     case "$out" in *'stub-qemu'*) ;; *) fail 'stub qemu should have been used' ;; esac
     case "$out" in *'aarch64.elf one two words --flag'*) ;; *) fail 'program arguments should be forwarded verbatim' ;; esac
+
+    step 'qemu: 槽位归 guard（box64 式）时，模拟器从 binfmt.alternatives 的候选里找'
+    # 假注册表：可见（有 register），但里面没有 qemu 条目——就像 guard 自己的 conf
+    # 占着 /usr/lib/binfmt.d/emu-aarch64.conf 那个槽位的样子。
+    mkdir -p "$TMP/binfmt-alt" "$TMP/alt"
+    : > "$TMP/binfmt-alt/register"
+    cat > "$TMP/alt/qemu-aarch64.conf" <<EOF
+    :qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:$PWD/$TMP/bin/qemu-aarch64:CF
+    EOF
+    set +e
+    out=$(AOSC_EXEC_GUARD_BINFMT_DIR="$PWD/$TMP/binfmt-alt" \
+      AOSC_EXEC_GUARD_ALTERNATIVES_DIR="$PWD/$TMP/alt" \
+      AOSC_EXEC_GUARD_QEMU=always "$GUARD" "$TMP/aarch64.elf" 2>&1)
+    code=$?
+    set -e
+    printf '%s\nexit=%s\n' "$out" "$code"
+    [ "$code" -eq 42 ] \
+      || fail "注册表里没有条目时应退到 alternatives 的候选并交给它跑（期望 42，实际 $code）"
+    case "$out" in *'stub-qemu'*) ;; *) fail '应该通过 alternatives 候选里的 stub qemu 运行' ;; esac
 
     step 'qemu: ask without any way to ask → keep the old behavior (just run it)'
     set +e
@@ -945,7 +986,10 @@ systemd-install-test:
 
     cleanup() {
       set +e
+      update-alternatives --remove emu-aarch64.conf /usr/lib/binfmt.alternatives/aosc-exec-guard-aarch64.conf > /dev/null 2>&1
       rm -f "$CONF_DST" "$CONF_DST.disabled"
+      rm -f /usr/lib/binfmt.alternatives/aosc-exec-guard-aarch64.conf
+      [ "${created_qemu_alt:-no}" = yes ] && rm -f /usr/lib/binfmt.alternatives/qemu-aarch64.conf
       restart_binfmt
       [ -e "$ENTRY" ] && echo -1 > "$ENTRY"
       set -e
@@ -1064,6 +1108,58 @@ systemd-install-test:
         echo '=> 注意：qemu 未恢复，请检查 binfmt 条目（重启也能恢复）' >&2
       fi
     fi
+
+    step 'alternatives 模式（box64 式）：槽位 emu-aarch64.conf 指向 guard，模拟器从候选 conf 里找'
+    ALT_DIR=/usr/lib/binfmt.alternatives
+    GUARD_ALT=$ALT_DIR/aosc-exec-guard-aarch64.conf
+    QEMU_ALT=$ALT_DIR/qemu-aarch64.conf
+    SLOT=/usr/lib/binfmt.d/emu-aarch64.conf
+    running=$GUARD   # 工具正在跑，别删自己
+    # staging 出 alternatives 布局，把解释器指到本仓库的二进制，再登记槽位
+    PKG=$(mktemp -d)
+    scripts/install.sh --prefix "$PKG" --alternatives > /dev/null
+    install -Dm644 "$PKG/lib/binfmt.alternatives/aosc-exec-guard-aarch64.conf" "$GUARD_ALT"
+    sed -i "s|/usr/bin/aosc-exec-guard|$running|" "$GUARD_ALT"
+    rm -rf "$PKG"
+    update-alternatives --install "$SLOT" emu-aarch64.conf "$GUARD_ALT" 100
+    restart_binfmt
+    show_entry aosc-exec-guard-aarch64
+    [ -L "$SLOT" ] || { echo 'FAIL: 槽位 emu-aarch64.conf 应该是 alternatives 链接' >&2; exit 1; }
+    printf '  %s → %s\n' "$SLOT" "$(readlink "$SLOT")"
+    # 把 qemu 的条目从内核里拿掉，复现“干净世界”：模拟器包也搬进 alternatives 之后，
+    # emu-aarch64.conf 这个槽位只指向 guard，注册表里根本没有 qemu 的条目。
+    [ -e "$BM/qemu-aarch64" ] && echo -1 > "$BM/qemu-aarch64"
+    probe_entry() { # 从 --debug 行里取 qemu=<谁>（'-' = 没找到模拟器）
+      set +e
+      found=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_CONFIG_HOME AOSC_EXEC_GUARD_DEBUG=1 \
+        AOSC_EXEC_GUARD_NO_DIALOG=1 AOSC_EXEC_GUARD_QEMU=never AOSC_EXEC_GUARD_LANG=zh_CN \
+        HOME="$PWD/$TMP/home" "$GUARD" "$TMP/aarch64.elf" 2>&1 |
+        sed -n 's/.* qemu=\([^ ]*\) .*/\1/p' | head -1)
+      set -e
+    }
+    probe_entry
+    printf '  注册表里没有 qemu、alternatives 里也没有候选：qemu=%s\n' "$found"
+    [ "$found" = '-' ] || { echo 'FAIL: 没有候选时不该凭空认出模拟器' >&2; exit 1; }
+    if [ -f /usr/lib/binfmt.d/qemu-aarch64.conf ]; then
+      # 模拟器包搬进 alternatives 之后的样子：候选 conf 和 guard 的摆在一起
+      if [ ! -e "$QEMU_ALT" ]; then
+        install -Dm644 /usr/lib/binfmt.d/qemu-aarch64.conf "$QEMU_ALT"
+        created_qemu_alt=yes
+      fi
+      probe_entry
+      printf '  把 qemu 的 conf 放进 binfmt.alternatives 之后：qemu=%s\n' "$found"
+      [ "$found" = 'qemu-aarch64' ] \
+        || { echo 'FAIL: 应该从 binfmt.alternatives 的候选 conf 里认出 qemu-aarch64' >&2; exit 1; }
+      echo '=> 槽位归 guard 时，模拟器从 /usr/lib/binfmt.alternatives/ 的候选里找（qemu / box64 / FEX… 一视同仁）'
+    else
+      echo '（没装 qemu-aarch64-static？跳过候选那半段）'
+    fi
+    # 还原：撤掉槽位与临时 conf，restart 把 qemu 的条目带回来
+    update-alternatives --remove emu-aarch64.conf "$GUARD_ALT" > /dev/null
+    rm -f "$GUARD_ALT"
+    restart_binfmt
+    [ ! -e "$SLOT" ] || { echo 'FAIL: 槽位没被移除' >&2; exit 1; }
+    echo '=> alternatives 槽位已清理'
 
     step 'systemd-binfmt 安装路径测试通过'
 

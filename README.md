@@ -22,7 +22,9 @@
 
   规则里的 magic/mask **逐字节抄自 AOSC OS 的 qemu-user 包**（`/usr/lib/binfmt.d/qemu-*.conf`，20 条），i386/x86_64 两条按同一模板补上（qemu 上游也有，本机因为是 x86_64 被它自己的安装器过滤掉了）——集合要全，别的主机才能拿它解释 amd64 程序。以后要覆盖新架构，从 qemu 的 conf/上游脚本里再抄一行即可。
 
-  `zz-` 前缀不是随手起的：systemd-binfmt 按文件名排序应用 conf、后应用者优先（实测），`zz-` 让 guard 排在 `qemu-*` 之后 → **guard 先接住外来架构的程序**，再由它决定要不要交给模拟器（见下）。**但这是“手动安装、没有包管理器介入”下的结论**：装到 AOSC OS 上之后，同一架构有好几个包能提供模拟器时，谁生效由 **`update-alternatives` 的优先级**决定——这些包把 conf 放在 `/usr/lib/binfmt.alternatives/`，由 alternatives 链接 `/usr/lib/binfmt.d/emu-<arch>.conf` 指过去（截至 2026-09：qemu 50、FEX 60、latx 80、box64 90；见 abbs 的 `app-virtualization/qemu/29-static-x86_64/build`、`app-emulation/{fex,latx,box64}/autobuild/alternatives`）。这套目前只用在本机跑不了、需要“外来 i386/x86_64”的场合（qemu 的构建脚本只在宿主不是 amd64/i486 时才生成 alternatives 条目），外来架构还是各包直接放 `qemu-<arch>.conf`，所以现在两者能并存、靠文件名分先后；打包进 AOSC 时 guard 怎么参与（单独一个 conf，还是加进同一组候选并定优先级）是那时要定的事，不能指望 `zz-`。
+  `zz-` 前缀不是随手起的：systemd-binfmt 按文件名排序应用 conf、后应用者优先（实测），`zz-` 让 guard 排在 `qemu-*` 之后 → **手动安装时 guard 先接住外来架构的程序**，再由它决定要不要交给模拟器（见下）。**装到包管理场景里就不是文件名的事了**：同一架构有好几个包能提供模拟器时，谁生效由 **`update-alternatives` 的优先级**决定——这些包把 conf 放在 `/usr/lib/binfmt.alternatives/`，由 alternatives 链接 `/usr/lib/binfmt.d/emu-<arch>.conf` 指过去（截至 2026-09：qemu 50、FEX 60、latx 80、box64 90；见 abbs 的 `app-virtualization/qemu/{07-static-i386,29-static-x86_64}/build`、`app-emulation/{fex,latx,box64}/autobuild/alternatives`；目前只有“本机跑不了、需要外来 i386/x86_64”的场合用这套，外来架构还是各包直接放 `qemu-<arch>.conf`）。
+
+  guard 走的就是 **`app-emulation/box64` 包那套做法**：`scripts/install.sh --alternatives` 把每个架构单独一条规则的 conf 放进 `<prefix>/lib/binfmt.alternatives/`，再把 `emu-<arch>.conf` 这个槽位登记成自己的候选（优先级 `--priority`，默认 100 = 比模拟器高，装了就由 guard 先问）；打 deb 包时 `share/aosc-exec-guard/alternatives` 里就是 abbs `autobuild/alternatives` 要的那几行，systemd 包的 dpkg trigger 会重新应用 binfmt。**槽位归 guard 之后，注册表里就没有模拟器条目了**（一个槽位只生效一个 conf），所以 guard 找模拟器多了第三处来源：自己可见的注册表 → 宿主注册表（chroot / 容器）→ **`/usr/lib/binfmt.alternatives/` 里能命中这个 ELF 的候选 conf**（`qemu-<arch>` 优先，否则按 conf 文件名排序取第一条），并把控制权交给它（换目录：`AOSC_EXEC_GUARD_ALTERNATIVES_DIR`，测试用）。`just systemd-install-test` 里有这条 A/B：候选都没有时 `qemu=-`，把 qemu 的 conf 放进候选目录后认出 `qemu-aarch64`。
 
   例如其中 aarch64 那条：
 
@@ -30,7 +32,7 @@
   :aosc-exec-guard-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/aosc-exec-guard:F
   ```
 
-  **装不到本机架构的规则上去**（会劫持解释器自身 → `ELOOP` → 全系统起不了新程序），但不用手工去删：`just install`（底层是 `scripts/install.sh`）按 qemu 的 `qemu-binfmt-conf.sh` **同一套“家族”表**过滤（amd64 上删 i386+x86_64、aarch64 上删 arm+aarch64、mips64 上删 mips 一族…），装到 `/usr` 后还会拿 `/usr/bin/true` 做 exec 冒烟测试，万一过滤漏了它会用内建命令立刻撤销并报错。所以**一份 conf 就够，不需要为每个目标架构各存一份**；打成包时用 `just install <目录>` 或直接 `scripts/install.sh --prefix <目录>`（交叉打包再加目标架构参数，见 `just --list` / `scripts/install.sh --help`）。
+  **装不到本机架构的规则上去**（会劫持解释器自身 → `ELOOP` → 全系统起不了新程序），但不用手工去删：`just install`（底层是 `scripts/install.sh`）按 qemu 的 `qemu-binfmt-conf.sh` **同一套“家族”表**过滤（amd64 上删 i386+x86_64、aarch64 上删 arm+aarch64、mips64 上删 mips 一族…），装到 `/usr` 后还会拿 `/usr/bin/true` 做 exec 冒烟测试，万一过滤漏了它会用内建命令立刻撤销并报错。所以**一份 conf 就够，不需要为每个目标架构各存一份**（`--alternatives` 模式会按架构拆成多份，那是给 alternatives 槽位用的，见上）；打成包时用 `just install <目录>` 或直接 `scripts/install.sh --prefix <目录>`（交叉打包再加目标架构参数，见 `just --list` / `scripts/install.sh --help`）。
 - `aosc-exec-guard` 的工作：
   - 读 ELF 头（只读前 20 字节），区分三种情况：外来架构 / 本机架构（本不该被条目命中，防呆）/ 根本不是 ELF；
   - 输出解释到 stderr；如果是从图形会话启动（有 `DISPLAY`/`WAYLAND_DISPLAY`，且 stdout/stderr 都不是终端，也不是 systemd 服务），再弹框（KDE 会话里优先用自带的 Kirigami 框，其次是 kdialog / zenity，见下文“图形弹框”）；
@@ -80,7 +82,7 @@ locales/zh-CN.yml            中文文案
 data/dialog.qml              KDE 会话里用的 Kirigami 弹框（Qt6 的 qml 运行时跑，见下文）
 justfile                     开发/测试/安装入口（just / just test / sudo just install …）
 rust-toolchain.toml         rustup：stable + 各主架构的 musl 标准库（静态构建用）
-scripts/install.sh           安装/卸载脚本（just install 就是调它；打包可直接调，不必依赖 just）
+scripts/install.sh           安装/卸载脚本（just install 调它；--alternatives = box64 式布局；打包可直接调，不必依赖 just）
 data/binfmt.d/zz-aosc-exec-guard.conf.in  规则模板（全集，22 条，抄自 qemu）；安装时由安装脚本过滤成 /usr/lib/binfmt.d/zz-aosc-exec-guard.conf
 ```
 
@@ -106,6 +108,9 @@ $ just install /tmp/pkg                  # 目标就是本机架构
 $ just install /tmp/pkg aarch64          # 交叉打包指定目标架构
 # 打包脚本也可以直接调安装脚本（不依赖 just）：
 $ scripts/install.sh --prefix /tmp/pkg --host-arch aarch64
+# box64 式布局：conf 进 lib/binfmt.alternatives/，并生成 alternatives 声明（abbs 的
+# autobuild/alternatives 直接抄）；真装（无 --prefix）时会顺便 update-alternatives 登记槽位
+$ scripts/install.sh --prefix /tmp/pkg --alternatives --priority 100
 ```
 
 可选的真实 aarch64 二进制：
@@ -243,7 +248,7 @@ $ sudo just install      # 装静态版；或手动 install -Dm755 target/static
 
 ## 已知问题 / 待办
 
-- **与模拟器条目的优先级**（前提是手动安装，见“实测结论”）：binfmt_misc 条目按注册顺序迭代、**后注册者优先**，systemd-binfmt 按文件名排序应用 conf；`zz-aosc-exec-guard.conf` 排在 `qemu-*` 之后，所以**干净启动时 guard 先匹配**，由它询问/转发给模拟器（`AOSC_EXEC_GUARD_QEMU=never` 可让它不插手）。**打包到系统上之后就不是文件名的事了**：同一架构有多个包能提供模拟器时，谁生效由 `update-alternatives` 的优先级决定（`/usr/lib/binfmt.d/emu-<arch>.conf` 指向优先级最高的候选包，见上文“原理”）。不想让 guard 介入的发行版/用户，把 conf 删掉或改名排到 qemu 前面即可，qemu 条目会照旧直接接管；`--handover` 就是把这件事做全（注销条目 + 停用 conf）。
+- **与模拟器条目的优先级**（前提是手动安装，见“实测结论”）：binfmt_misc 条目按注册顺序迭代、**后注册者优先**，systemd-binfmt 按文件名排序应用 conf；`zz-aosc-exec-guard.conf` 排在 `qemu-*` 之后，所以**干净启动时 guard 先匹配**，由它询问/转发给模拟器（`AOSC_EXEC_GUARD_QEMU=never` 可让它不插手）。**包管理场景走 `--alternatives`**（见上文“原理”）：guard 作为 `emu-<arch>.conf` 槽位的候选参与，优先级 `--priority`（默认 100 = 比模拟器的 50/60/80/90 高；想反过来就调小）。不想让 guard 介入的发行版/用户，把 conf 删掉或改名排到 qemu 前面即可，qemu 条目会照旧直接接管；`--handover` 就是把这件事做全（注销条目 + 停用 conf）。
 - **`--handover` 的代价**：让位之后 guard 的询问/解释不再出现，“总是不运行”这类用户级选择失效（见「让位给内核的 qemu 条目」）。
 - **ENOENT 盲区**：缺解释器的情况（如 32 位程序找不到 `/lib/ld-linux.so.2`、shebang 解释器不存在）报的是 `ENOENT` 而不是 `ENOEXEC`，`binfmt_misc` 拦不到，需要另行设计。
 - 文案内置中/英（见上文“语言”），跟判定无关；生产构建就是静态的（`just build`，见上文“构建”）。
@@ -255,7 +260,7 @@ $ sudo just install      # 装静态版；或手动 install -Dm755 target/static
 3. **systemd-binfmt 的顺序**：按文件名排序应用 conf 并逐个（重）注册；冲突时**最后应用的那个胜出**。
 4. **于是（手动安装的前提）**：`zz-aosc-exec-guard.conf`（z）排在 `qemu-*.conf`（q）之后 → 干净启动时 guard 后应用、优先级更高 → **guard 先接住外来架构的程序**，再按 `--qemu` / `AOSC_EXEC_GUARD_QEMU` / 用户配置决定是转发给模拟器还是只解释（`just kernel-test`、`just systemd-install-test` 都会验证这一步；这两个配方走的都是“手工把 conf 放进 `/usr/lib/binfmt.d/`”的路径）。
 5. **清理**：`systemd-binfmt` 重启会注销"不在配置里"的条目；也可手动 `echo -1 > /proc/sys/fs/binfmt_misc/<条目名>`。
-6. **打包注意**：conf 带 `F` 标志 → 注册时解释器文件必须已存在（试过不存在的路径，服务直接报 `No such file or directory` 注册失败）；二进制和 conf 在同一包里安装没问题。另外，**同一架构有多个包能提供模拟器时，谁生效由 alternatives 优先级决定**（`/usr/lib/binfmt.d/emu-<arch>.conf` 链接到优先级最高的候选包，i386/x86_64 家族现为 qemu 50 / FEX 60 / latx 80 / box64 90），guard 真要打包时得按这套机制参与，别依赖 conf 文件名字典序。
+6. **打包注意**：conf 带 `F` 标志 → 注册时解释器文件必须已存在（试过不存在的路径，服务直接报 `No such file or directory` 注册失败）；二进制和 conf 在同一包里安装没问题。另外，**同一架构有多个包能提供模拟器时，谁生效由 alternatives 优先级决定**（`/usr/lib/binfmt.d/emu-<arch>.conf` 链接到优先级最高的候选，i386/x86_64 家族现为 qemu 50 / FEX 60 / latx 80 / box64 90）——`scripts/install.sh --alternatives` 就是按这套登记自己的。本机 qemu 的 aarch64 conf 还是普通文件、名字排在 `emu-aarch64.conf` 之后，所以在没搬家的系统上装 alternatives 模式，guard 的条目会被它压过（安装脚本会提示，测试里拿“把 qemu 的 conf 放进候选目录”复现干净世界）。
 7. **端到端行为**：伪造和真实的 aarch64 ELF 都被 guard 接管（中文解释 + 退出码 126）；禁用/恢复 qemu、条目清理均验证通过。
 8. **一个 conf 文件可以放多条规则**：`man binfmt.d` 原文是 "Each file contains a list of binfmt_misc kernel binary format rules"，systemd-binfmt 逐行注册、`#`/`;` 开头的注释行忽略（实测：一个文件里两行规则同时注册成功，删掉文件重启后对应条目消失）。
 9. **本机架构怎么排除**：不需要为每个目标架构各存一份 conf。qemu 上游（`qemu-binfmt-conf.sh`）是按 CPU **家族**过滤的——i386+x86_64 一族、arm+aarch64 一族、mips 全族、ppc/ppc64 一族、sparc 全族等，`ignore-family=yes`（`just install` 的第三个参数）对应 qemu 的同名选项：同家族但本机跑不了的目标，如 riscv64 上的 riscv32。`just install` 抄的就是这套表，实测：本机 x86_64 装完剩 20 条（去掉 i386+x86_64），目标换成 aarch64 则去掉 arm+aarch64、保留 x86_64。
